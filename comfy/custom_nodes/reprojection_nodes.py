@@ -263,12 +263,13 @@ class ReprojectImage:
             )
             sampled_mask = sampled_mask * (sampled_mask > 0)  # Apply feathering
 
-            mask = sampled_mask.squeeze(0).clamp(0, 1)  # Normalize to 0-1 range
+            mask = sampled_mask.clamp(0, 1)  # Normalize to 0-1 range
 
         # Normalize image to 0-1 range and convert to BHWC
+        
         image = sampled_tensor[:, :-1, :, :].permute(0, 2, 3, 1)  # BCHW to BHWC
-
-        return image, mask
+        
+        return image, mask[None, ...]  # add batch dimension to mask
 
 
 class TransformToMatrix:
