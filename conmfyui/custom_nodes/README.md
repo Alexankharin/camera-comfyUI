@@ -17,5 +17,3 @@ Refer to the example workflows in the `workflows/` folder to get started.
 
 ## Contributing
 Feel free to submit issues or pull requests to improve this repository.
-
-node_typing should be placed into comfyui/custom_nodes/ folder, and the rest of the files should be placed into comfui/custom_nodes/camera/ folder.
