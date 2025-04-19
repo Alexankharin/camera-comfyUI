@@ -4,8 +4,6 @@ import numpy as np
 from typing import Dict, Tuple, Any
 import math
 
-ZBUFFER_RESOLUTION = 1024
-
 class Projection:
     """
     A class to define supported projection types.
@@ -13,7 +11,10 @@ class Projection:
     PROJECTIONS = ["PINHOLE", "FISHEYE", "EQUIRECTANGULAR"]
 
 # ==== Depth to pointcloud conversion functions ==== #
-def pinhole_depth_to_XYZ(depth: torch.Tensor, fov: float):
+def pinhole_depth_to_XYZ(depth: torch.Tensor, fov: float) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Convert depth map to XYZ coordinates using pinhole projection.
+    """
     fov_rad = math.radians(fov)
     f = 1.0 / math.tan(fov_rad / 2)
     H, W = depth.shape
@@ -27,7 +28,10 @@ def pinhole_depth_to_XYZ(depth: torch.Tensor, fov: float):
     Z = depth * torch.cos(theta)
     return X, Y, Z
 
-def fisheye_depth_to_XYZ(depth: torch.Tensor, fov: float):
+def fisheye_depth_to_XYZ(depth: torch.Tensor, fov: float) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Convert depth map to XYZ coordinates using fisheye projection.
+    """
     # equidistant fisheye: θ = Ruv * (fov/2), Ruv∈[-1,1]
     fov_rad = math.radians(fov)
     H, W = depth.shape
@@ -41,7 +45,10 @@ def fisheye_depth_to_XYZ(depth: torch.Tensor, fov: float):
     Z = depth * torch.cos(theta)
     return X, Y, Z
 
-def equirect_depth_to_XYZ(depth: torch.Tensor, *_):
+def equirect_depth_to_XYZ(depth: torch.Tensor, *_: Any) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Convert depth map to XYZ coordinates using equirectangular projection.
+    """
     # full 360°×180° equirectangular
     H, W = depth.shape
     lon = torch.linspace(-math.pi, math.pi, W, device=depth.device).unsqueeze(0).expand(H, W)
@@ -54,7 +61,10 @@ def equirect_depth_to_XYZ(depth: torch.Tensor, *_):
 
 # ==== XYZ→Normalized UV + depth ====
 
-def XYZ_to_pinhole(X: torch.Tensor, Y: torch.Tensor, Z: torch.Tensor, fov: float):
+def XYZ_to_pinhole(X: torch.Tensor, Y: torch.Tensor, Z: torch.Tensor, fov: float) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Convert XYZ coordinates to normalized UV and depth using pinhole projection.
+    """
     fov_rad = math.radians(fov)
     f = 1.0 / math.tan(fov_rad / 2)
     depth = torch.sqrt(X**2 + Y**2 + Z**2)
@@ -65,7 +75,10 @@ def XYZ_to_pinhole(X: torch.Tensor, Y: torch.Tensor, Z: torch.Tensor, fov: float
     v     = r * torch.sin(phi)
     return u, v, depth
 
-def XYZ_to_fisheye(X: torch.Tensor, Y: torch.Tensor, Z: torch.Tensor, fov: float):
+def XYZ_to_fisheye(X: torch.Tensor, Y: torch.Tensor, Z: torch.Tensor, fov: float) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Convert XYZ coordinates to normalized UV and depth using fisheye projection.
+    """
     # equidistant fisheye: u = (θ/(fov/2))·cosφ, etc.
     fov_rad = math.radians(fov)
     depth   = torch.sqrt(X**2 + Y**2 + Z**2)
@@ -76,7 +89,10 @@ def XYZ_to_fisheye(X: torch.Tensor, Y: torch.Tensor, Z: torch.Tensor, fov: float
     v       = r * torch.sin(phi)
     return u, v, depth
 
-def XYZ_to_equirect(X: torch.Tensor, Y: torch.Tensor, Z: torch.Tensor, fov: float):
+def XYZ_to_equirect(X: torch.Tensor, Y: torch.Tensor, Z: torch.Tensor, fov: float) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Convert XYZ coordinates to normalized UV and depth using equirectangular projection.
+    """
     # full 360°×180°  
     fov_rad = math.radians(fov)
     depth = torch.sqrt(X**2 + Y**2 + Z**2)
@@ -86,7 +102,10 @@ def XYZ_to_equirect(X: torch.Tensor, Y: torch.Tensor, Z: torch.Tensor, fov: floa
     v     = lat / (math.pi / 2)          # –1 → +1 down height
     return u, v, depth
 
-def project_first_hit(volume_sparse: torch.Tensor) -> torch.Tensor:
+def project_first_hit(volume_sparse: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Project the first hit in a sparse volume to an RGBA image and mask.
+    """
     volume = volume_sparse.to_dense().float()      # (H, W, D, 4)
     
     hit       = volume[..., 3] > 0                # per‑slice hit
@@ -105,6 +124,9 @@ class DepthToPointCloud:
     """
     @classmethod
     def INPUT_TYPES(cls) -> Dict[str, Any]:
+        """
+        Define the input types for the node.
+        """
         return {
             "required": {
                 "image": ("IMAGE",),
@@ -126,6 +148,9 @@ class DepthToPointCloud:
         input_horizontal_fov: float,
         depthmap: torch.Tensor = None
     ) -> Tuple[torch.Tensor]:
+        """
+        Convert depth map and image to a point cloud.
+        """
         # ----- handle image tensor -----
         img = image
         # if batched
@@ -186,6 +211,9 @@ class TransformPointCloud:
     """
     @classmethod
     def INPUT_TYPES(cls) -> Dict[str, Any]:
+        """
+        Define the input types for the node.
+        """
         return {
             "required": {
                 "pointcloud": ("TENSOR",),
@@ -201,6 +229,9 @@ class TransformPointCloud:
         pointcloud: torch.Tensor,
         transform_matrix: torch.Tensor
     ) -> Tuple[torch.Tensor]:
+        """
+        Apply a transformation matrix to a point cloud.
+        """
         coords = pointcloud[:, :3]
         attrs = pointcloud[:, 3:]
         N = coords.shape[0]
@@ -218,6 +249,9 @@ class ProjectPointCloud:
     """
     @classmethod
     def INPUT_TYPES(cls) -> Dict[str, Any]:
+        """
+        Define the input types for the node.
+        """
         return {
             "required": {
                 "pointcloud": ("TENSOR",),
@@ -225,7 +259,6 @@ class ProjectPointCloud:
                 "output_horizontal_fov": ("FLOAT", {"default": 90.0}),
                 "output_width": ("INT", {"default": 512, "min": 1}),
                 "output_height": ("INT", {"default": 512, "min": 1}),
-                "zbuffer_resolution": ("INT", {"default": ZBUFFER_RESOLUTION}),
             }
         }
     RETURN_TYPES = ("IMAGE", "MASK")
@@ -239,8 +272,10 @@ class ProjectPointCloud:
         output_horizontal_fov: float,
         output_width: int,
         output_height: int,
-        zbuffer_resolution: int  # we no longer use this
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Project a point cloud back into an image and mask using z-buffering.
+        """
         device = pointcloud.device
         coords = pointcloud[:, :3]
         colors = pointcloud[:, 3:].float()      # assume in [0–255]
