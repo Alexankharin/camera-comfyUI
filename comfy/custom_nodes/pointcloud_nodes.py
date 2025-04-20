@@ -132,6 +132,8 @@ class DepthToPointCloud:
                 "image": ("IMAGE",),
                 "input_projection": (Projection.PROJECTIONS, {"tooltip": "projection type of depth map"}),
                 "input_horizontal_fov": ("FLOAT", {"default": 90.0, "min": 0.0, "max": 360.0, "step": 1.0}),
+                "depth_scale": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1000.0, "step": 0.1, "tooltip": "Scale factor for depth values"}),
+                "invert_depth": ("BOOLEAN", {"default": False, "tooltip": "Invert the depth map values"}),
             },
             "optional": {
                 "depthmap": ("IMAGE",),
@@ -146,7 +148,9 @@ class DepthToPointCloud:
         image: torch.Tensor,
         input_projection: str,
         input_horizontal_fov: float,
-        depthmap: torch.Tensor = None
+        invert_depth: bool,
+        depth_scale: float,
+        depthmap: torch.Tensor = None # BHWC or HWC
     ) -> Tuple[torch.Tensor]:
         """
         Convert depth map and image to a point cloud.
@@ -166,23 +170,26 @@ class DepthToPointCloud:
         if depthmap is None:
             depth = torch.ones((H, W), device=img.device)
         else:
-            d = depthmap
+            d = depthmap            
             if d.dim() == 4:
-                d = d.squeeze(0)
+                d = d.squeeze(0).mean(-1)  # BHWC -> HW
             # collapse channel dim
-            if d.dim() == 3:
-                # if single-channel, squeeze; else average channels
-                if d.shape[0] == 1:
-                    d = d.squeeze(0)
-                else:
-                    d = d.mean(dim=0)
+            elif d.dim() == 3: # HWC-> HW
+                d= d.mean(-1)  # HWC -> HW            
             # now d is (H_d, W_d)
+            elif d.dim() == 2:
+                d=d # WH
             H_d, W_d = d.shape
             if (H_d, W_d) != (H, W):
                 d = F.interpolate(d.unsqueeze(0).unsqueeze(0), size=(H, W), mode='bilinear', align_corners=False)
                 d = d.squeeze(0).squeeze(0)
             depth = d
-
+                   # ----- apply depth inversion and scaling -----
+        if invert_depth:
+            depth = 1.0 / depth.clamp(min=1e-6)  # Avoid division by zero
+            depth = depth.clamp(max=1000.0)     # Clamp to avoid inf values
+        depth = depth * depth_scale
+    
         # ----- convert to XYZ -----
         if input_projection == "PINHOLE":
             X, Y, Z = pinhole_depth_to_XYZ(depth, input_horizontal_fov)
@@ -324,17 +331,123 @@ class ProjectPointCloud:
         alpha   = (img_hw4[..., 3] > 0).float()  # (H,W)
 
         # apply alpha → premultiplied RGB
-        rgb = rgb * alpha.unsqueeze(-1)         # (H,W,3)
-
+        rgb = rgb * alpha.unsqueeze(-1)         # (H,W,3) , gray background
         # 7) build outputs in the shape ComfyUI expects:
-        #    image: (1, H, W, 3), mask: (H, W)
         img  = rgb.unsqueeze(0)      # (1, H, W, 3), floats in [0,1]
-        mask = alpha                            # (H, W), floats 0 or 1
+        mask = alpha
+        #    image: (1, H, W, 3), mask: (H, W), floats 0 or 1
+
 
         return img, mask
+
+class DepthAwareInpainter:
+    """
+    Inpaint holes in an RGB image using depth-aware argmax propagation over a provided mask.
+    When multiple fronts meet, preference is given to the path with greatest depth.
+    """
+    @classmethod
+    def INPUT_TYPES(cls) -> Dict[str, Any]:
+        return {
+            "required": {
+                "image":       ("IMAGE",),                         # RGB image as (1,H,W,3) or (H,W,3)
+                "mask":        ("IMAGE",),                         # binary mask to inpaint: 1=keep, 0=hole
+                "depthmap":    ("IMAGE",),                         # Depth map as various shapes
+                "kernel":      ("INT", {"default":5,  "min":3,  "max":21, "step":2, "tooltip":"Patch size k"}),
+                "max_iters":   ("INT", {"default":10, "min":1,  "max":100,"step":1, "tooltip":"Max passes"}),
+                "invert_depth":("BOOLEAN", {"default":False, "tooltip":"Invert the depth map (1/depth)"}),
+            }
+        }
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "depth_aware_inpaint"
+    CATEGORY = "inpainting"
+
+    def depth_aware_inpaint(
+        self,
+        image:       torch.Tensor,
+        mask:        torch.Tensor,
+        depthmap:    torch.Tensor,
+        kernel:      int,
+        max_iters:   int,
+        invert_depth:bool
+    ) -> Tuple[torch.Tensor]:
+        # unbatch and RGB extraction
+        img = image
+        if img.dim() == 4 and img.shape[0] == 1:
+            img = img.squeeze(0)
+        if img.shape[2] == 4:
+            img = img[..., :3]
+        H, W = img.shape[0], img.shape[1]
+        rgb = img
+
+        # mask -> curr_mask (H,W) float
+        m = mask
+        if m.dim() == 4 and m.shape[0] == 1:
+            m = m.squeeze(0)
+        if m.dim() == 3 and m.shape[2] == 3:
+            m = m[...,0]
+        curr_mask = (m>0).float()
+
+        # depthmap -> d (H,W)
+        d = depthmap
+        if d.dim() == 5 and d.shape[0]==1 and d.shape[1]==1:
+            d = d.squeeze(0).squeeze(0)
+        if d.dim() == 4 and d.shape[0]==1:
+            d = d.squeeze(0)
+        if d.dim() == 3:
+            d = d.mean(-1)
+        if invert_depth:
+            d = 1.0 / d.clamp(min=1e-6)
+        # original depth saved
+        orig_d = d.clone()
+        # initialize dynamic depth: holes=-1, known=orig_d
+        curr_depth = orig_d.masked_fill(curr_mask==0, -1.0)
+
+        # BxCxHxW tensors
+        rgb_t = rgb.permute(2,0,1).unsqueeze(0)          # (1,3,H,W)
+        depth_t = curr_depth.unsqueeze(0).unsqueeze(0)   # (1,1,H,W)
+
+        def fill_once(rgb_bchw, depth_bchw, mask_hw, k):
+            B,C,Hc,Wc = rgb_bchw.shape
+            pad = k//2
+            # unfold patches
+            rgb_p = F.unfold(rgb_bchw, k, padding=pad).view(B,C,k*k,Hc*Wc)
+            depth_p = F.unfold(depth_bchw, k, padding=pad).view(B,1,k*k,Hc*Wc)
+            # pick farthest neighbor by current depth
+            idx = depth_p.argmax(dim=2, keepdim=True)      # (1,1,k*k,H*W)
+            idx_rgb = idx.expand(-1,C,-1,-1)
+            cols = rgb_p.gather(2, idx_rgb).squeeze(2)     # (1,3,H*W)
+            # scatter only holes
+            out = rgb_bchw.view(B,C,Hc*Wc).clone()
+            holes = (mask_hw.view(Hc*Wc)==0)
+            out[:,:,holes] = cols[:,:,holes]
+            return out.view(B,C,Hc,Wc), idx, depth_p
+
+        out = rgb_t
+        mask_map = curr_mask
+        depth_map = curr_depth
+        for _ in range(max_iters):
+            prev_holes = (mask_map==0).sum()
+            out_new, idx_map, depth_patches = fill_once(out, depth_map.unsqueeze(0).unsqueeze(0), mask_map, kernel)
+            # newly filled positions
+            filled_img = out_new.squeeze(0).permute(1,2,0)
+            newly = (mask_map==0) & (filled_img.sum(dim=2)>0)
+            if not newly.any():
+                break
+            # update mask
+            mask_map[newly] = 1
+            # update depth_map at new positions from orig_d
+            depth_map[newly] = orig_d[newly]
+            out = out_new
+
+        # reconstruct RGBA
+        final_rgb = out.squeeze(0).permute(1,2,0)
+        rgba = torch.cat([final_rgb, mask_map.unsqueeze(-1)], dim=2).unsqueeze(0)
+        return (rgba[...,:-1],)
+
 
 NODE_CLASS_MAPPINGS = {
     "DepthToPointCloud": DepthToPointCloud,
     "TransformPointCloud": TransformPointCloud,
     "ProjectPointCloud": ProjectPointCloud,
+    "DepthAwareInpainter": DepthAwareInpainter,
 }
