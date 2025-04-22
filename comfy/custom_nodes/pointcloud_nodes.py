@@ -252,93 +252,138 @@ class TransformPointCloud:
 
 class ProjectPointCloud:
     """
-    Project a point cloud tensor (N,7) back into image & mask using z-buffering.
+    Project a point cloud tensor (N,7) back into an image & mask using z-buffering,
+    with adjustable point_size (neighborhood width) to fill any gaps.
     """
+
     @classmethod
     def INPUT_TYPES(cls) -> Dict[str, Any]:
-        """
-        Define the input types for the node.
-        """
         return {
             "required": {
-                "pointcloud": ("TENSOR",),
-                "output_projection": (Projection.PROJECTIONS, {}),
+                "pointcloud":          ("TENSOR",),
+                "output_projection":   (Projection.PROJECTIONS, {}),
                 "output_horizontal_fov": ("FLOAT", {"default": 90.0}),
-                "output_width": ("INT", {"default": 512, "min": 1}),
-                "output_height": ("INT", {"default": 512, "min": 1}),
+                "output_width":        ("INT",   {"default": 512, "min": 1}),
+                "output_height":       ("INT",   {"default": 512, "min": 1}),
+                "point_size":          ("INT",   {"default": 1,   "min": 1}),
             }
         }
+
     RETURN_TYPES = ("IMAGE", "MASK")
-    FUNCTION = "project_pointcloud"
-    CATEGORY = "pointcloud"
+    FUNCTION     = "project_pointcloud"
+    CATEGORY     = "pointcloud"
 
     def project_pointcloud(
         self,
-        pointcloud: torch.Tensor,
+        pointcloud:    torch.Tensor,
         output_projection: str,
         output_horizontal_fov: float,
-        output_width: int,
+        output_width:  int,
         output_height: int,
+        point_size:    int = 1,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Project a point cloud back into an image and mask using z-buffering.
-        """
+
         device = pointcloud.device
         coords = pointcloud[:, :3]
-        colors = pointcloud[:, 3:].float()      # assume in [0–255]
+        colors = pointcloud[:, 3:].float()  # assume [0–255]
 
-        # 1) project into camera space
-        X, Y, Z = coords[:,0], coords[:,1], coords[:,2]
-        if output_projection == "PINHOLE":
-            u, v, depth = XYZ_to_pinhole(X, Y, Z, output_horizontal_fov)
-        elif output_projection == "FISHEYE":
-            u, v, depth = XYZ_to_fisheye(X, Y, Z, output_horizontal_fov)
-        else:
-            u, v, depth = XYZ_to_equirect(X, Y, Z, output_horizontal_fov)
+        # 1) project & rasterize raw points
+        u, v, depth = self._project(coords, output_projection, output_horizontal_fov)
+        ix, iy     = self._rasterize(u, v, output_width, output_height)
 
-        # 2) rasterize to integer pixel coords
-        W, H = output_width, output_height
-        px = (u * (W - 1) / 2) + (W - 1) / 2
-        py = (v * (H - 1) / 2) + (H - 1) / 2
-        ix = px.round().clamp(0, W-1).long()
-        iy = py.round().clamp(0, H-1).long()
+        # 2) first z‐buffer pass: nearest points, no expansion
+        fg_rgb, fg_alpha = self._zbuffer_pass(
+            ix, iy, depth, colors, output_width, output_height, mode="front"
+        )
 
-        # flatten 2D → 1D pixel index
-        pix = iy * W + ix           # shape (N,)
-        M   = W * H
+        # 3) if holes remain AND point_size>1, fill with an expanded farthest‐depth pass
+        if point_size > 1:
+            ix2, iy2, depth2, colors2 = self._expand(ix, iy, depth, colors, point_size, output_width, output_height)
+            bg_rgb, bg_alpha = self._zbuffer_pass(
+                ix2, iy2, depth2, colors2, output_width, output_height, mode="back"
+            )
+            # fill only where fg is empty but bg has data
+            hole = (fg_alpha == 0) & (bg_alpha > 0)
+            fg_rgb[hole]   = bg_rgb[hole]
+            fg_alpha[hole] = 1.0
 
-        # 3) for each pixel, find its nearest depth
-        min_depth = torch.full((M,), float('inf'), device=device)
-        min_depth.scatter_reduce_(0, pix, depth, reduce='amin', include_self=True)
-
-        # mask which points actually sit at that nearest depth
-        is_min = depth == min_depth[pix]    # (N,)
-
-        # 4) break ties by picking the first point seen
-        order      = torch.arange(depth.shape[0], device=device)
-        order_mask = torch.where(is_min, order, torch.full_like(order, depth.shape[0]))
-        min_order  = torch.full((M,), depth.shape[0], device=device)
-        min_order.scatter_reduce_(0, pix, order_mask, reduce='amin', include_self=True)
-        winner     = order == min_order[pix]  # final 1‑point mask
-
-        # 5) scatter that point’s RGBA into a flat H×W image
-        flat_rgba = torch.zeros((M,4), device=device)
-        flat_rgba[pix[winner]] = colors[winner]
-
-        # 6) reshape and split out
-        img_hw4 = flat_rgba.view(H, W, 4)      # (H,W,4)
-        rgb     = img_hw4[..., :3].clamp(0.0,255.0)
-        alpha   = (img_hw4[..., 3] > 0).float()  # (H,W)
-
-        # apply alpha → premultiplied RGB
-        rgb = rgb * alpha.unsqueeze(-1)         # (H,W,3) , gray background
-        # 7) build outputs in the shape ComfyUI expects:
-        img  = rgb.unsqueeze(0)      # (1, H, W, 3), floats in [0,1]
-        mask = alpha
-        #    image: (1, H, W, 3), mask: (H, W), floats 0 or 1
-
+        # 4) package to (1, H, W, 3) [0–1] and (H, W)
+        img  = fg_rgb.unsqueeze(0)
+        mask = fg_alpha
 
         return img, mask
+
+    def _project(self, coords, proj, fov):
+        X, Y, Z = coords.unbind(1)
+        if proj == "PINHOLE":
+            return XYZ_to_pinhole(X, Y, Z, fov)
+        elif proj == "FISHEYE":
+            return XYZ_to_fisheye(X, Y, Z, fov)
+        else:
+            return XYZ_to_equirect(X, Y, Z, fov)
+
+    def _rasterize(self, u, v, W, H):
+        px = (u * (W - 1) / 2) + (W - 1) / 2
+        py = (v * (H - 1) / 2) + (H - 1) / 2
+        return px.round().clamp(0, W-1).long(), py.round().clamp(0, H-1).long()
+
+    def _expand(self, ix, iy, depth, colors, size, W, H):
+        """
+        Expand each point into a size×size square.
+        Offsets centered: size=3 → offsets [-1,0,1].
+        """
+        dev = ix.device
+        # compute centered offsets
+        offsets = torch.arange(size, device=dev) - (size // 2)
+        dx, dy = torch.meshgrid(offsets, offsets, indexing="xy")
+        dx = dx.reshape(-1)  # (K,)
+        dy = dy.reshape(-1)
+
+        K = dx.numel()
+        # create expanded indices
+        ix2 = ix.unsqueeze(1) + dx  # (N, K)
+        iy2 = iy.unsqueeze(1) + dy
+        ix2 = ix2.clamp(0, W-1).reshape(-1)
+        iy2 = iy2.clamp(0, H-1).reshape(-1)
+
+        # replicate depth and colors for each neighbor
+        depth2  = depth.unsqueeze(1).expand(-1, K).reshape(-1)
+        colors2 = colors.unsqueeze(1).expand(-1, K, 4).reshape(-1, 4)
+
+        return ix2, iy2, depth2, colors2
+
+    def _zbuffer_pass(self, ix, iy, depth, colors, W, H, mode="front"):
+        """
+        mode="front": keep nearest (amin)
+        mode="back":  keep farthest (amax)
+        """
+        pix = iy * W + ix
+        M   = W * H
+
+        if mode == "front":
+            init, red = float('inf'), 'amin'
+        else:
+            init, red = -float('inf'), 'amax'
+
+        depth_map = torch.full((M,), init, device=ix.device)
+        depth_map.scatter_reduce_(0, pix, depth, reduce=red, include_self=True)
+
+        sel = depth == depth_map[pix]
+        order = torch.arange(depth.shape[0], device=ix.device)
+        order_m = torch.where(sel, order, torch.full_like(order, depth.shape[0]))
+        best_o = torch.full((M,), depth.shape[0], device=ix.device)
+        best_o.scatter_reduce_(0, pix, order_m, reduce='amin', include_self=True)
+        win = order == best_o[pix]
+
+        flat = torch.zeros((M,4), device=ix.device)
+        flat[pix[win]] = colors[win]
+
+        img4 = flat.view(H, W, 4)
+        rgb  = img4[..., :3].clamp(0,255)
+        a    = (img4[..., 3] > 0).float()
+        rgb *= a.unsqueeze(-1)
+
+        return rgb, a
 
 class DepthAwareInpainter:
     """
