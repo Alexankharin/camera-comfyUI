@@ -268,7 +268,11 @@ class ReprojectImage:
         # Normalize image to 0-1 range and convert to BHWC
         
         image = sampled_tensor[:, :-1, :, :].permute(0, 2, 3, 1)  # BCHW to BHWC
-        
+        if output_projection == "FISHEYE":
+            # add circular mask to image
+            mask_circle = torch.sqrt(grid_x**2 + grid_y**2) <= 1.0
+            mask=mask*(mask_circle*1)
+            image = image * mask_circle.unsqueeze(0).unsqueeze(-1)
         return image, mask[None, ...]  # add batch dimension to mask
 
 
