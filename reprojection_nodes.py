@@ -291,9 +291,9 @@ class TransformToMatrix:
         """
         return {
             "required": {
-                "shiftX": ("FLOAT", {"default": 0.0, "min": -1000.0, "max": 1000.0, "step": 0.1}),
-                "shiftY": ("FLOAT", {"default": 0.0, "min": -1000.0, "max": 1000.0, "step": 0.1}),
-                "shiftZ": ("FLOAT", {"default": 0.0, "min": -1000.0, "max": 1000.0, "step": 0.1}),
+                "shiftX": ("FLOAT", {"default": 0.0, "min": -1000.0, "max": 1000.0, "step": 0.01}),
+                "shiftY": ("FLOAT", {"default": 0.0, "min": -1000.0, "max": 1000.0, "step": 0.01}),
+                "shiftZ": ("FLOAT", {"default": 0.0, "min": -1000.0, "max": 1000.0, "step": 0.01}),
                 "theta": ("FLOAT", {"default": 0.0, "min": -360.0, "max": 360.0, "step": 1.0}),
                 "phi": ("FLOAT", {"default": 0.0, "min": -360.0, "max": 360.0, "step": 1.0}),
             }

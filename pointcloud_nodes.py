@@ -1,8 +1,10 @@
 import torch
 import torch.nn.functional as F
 import numpy as np
-from typing import Dict, Tuple, Any
+from typing import Dict, Tuple, Any, List
 import math
+import os
+import folder_paths
 
 class Projection:
     """
@@ -137,6 +139,7 @@ class DepthToPointCloud:
             },
             "optional": {
                 "depthmap": ("IMAGE",),
+                "mask": ("IMAGE",),
             }
         }
     RETURN_TYPES = ("TENSOR",)
@@ -150,7 +153,8 @@ class DepthToPointCloud:
         input_horizontal_fov: float,
         invert_depth: bool,
         depth_scale: float,
-        depthmap: torch.Tensor = None # BHWC or HWC
+        depthmap: torch.Tensor = None, # BHWC or HWC
+        mask: torch.Tensor = None
     ) -> Tuple[torch.Tensor]:
         """
         Convert depth map and image to a point cloud.
@@ -204,9 +208,17 @@ class DepthToPointCloud:
         rgba = img.permute(1,2,0).float()  # H,W,C
         # add alpha if missing
         if C == 3:
-            alpha = torch.ones((H, W, 1), device=rgba.device)*255
+            alpha = torch.ones((H, W, 1), device=rgba.device)*1
             rgba = torch.cat([rgba, alpha], dim=2)
         colors = rgba.reshape(-1, 4)
+
+        # ----- apply mask if given -----
+        if mask is not None:
+            mask = mask.squeeze(0).mean(-1) if mask.dim() == 4 else mask.mean(-1) if mask.dim() == 3 else mask
+            mask = F.interpolate(mask.unsqueeze(0).unsqueeze(0), size=(H, W), mode='bilinear', align_corners=False).squeeze(0).squeeze(0)
+            mask = mask > 0.5
+            coords = coords[mask.view(-1)]
+            colors = colors[mask.view(-1)]
 
         # ----- concat into pointcloud -----
         pointcloud = torch.cat([coords, colors], dim=1)
@@ -266,10 +278,11 @@ class ProjectPointCloud:
                 "output_width":        ("INT",   {"default": 512, "min": 1}),
                 "output_height":       ("INT",   {"default": 512, "min": 1}),
                 "point_size":          ("INT",   {"default": 1,   "min": 1}),
+                "return_inverse_depth": ("BOOLEAN", {"default": False, "tooltip": "Return inverse depth instead of regular depth"}),
             }
         }
 
-    RETURN_TYPES = ("IMAGE", "MASK")
+    RETURN_TYPES = ("IMAGE", "MASK", "IMAGE")
     FUNCTION     = "project_pointcloud"
     CATEGORY     = "pointcloud"
 
@@ -281,37 +294,49 @@ class ProjectPointCloud:
         output_width:  int,
         output_height: int,
         point_size:    int = 1,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-
+        return_inverse_depth: bool = False,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         device = pointcloud.device
         coords = pointcloud[:, :3]
         colors = pointcloud[:, 3:].float()  # assume [0–255]
 
         # 1) project & rasterize raw points
         u, v, depth = self._project(coords, output_projection, output_horizontal_fov)
-        ix, iy     = self._rasterize(u, v, output_width, output_height)
+        ix, iy    = self._rasterize(u, v, output_width, output_height)
 
         # 2) first z‐buffer pass: nearest points, no expansion
-        fg_rgb, fg_alpha = self._zbuffer_pass(
+        fg_rgb, fg_alpha, depth_front = self._zbuffer_pass(
             ix, iy, depth, colors, output_width, output_height, mode="front"
         )
 
         # 3) if holes remain AND point_size>1, fill with an expanded farthest‐depth pass
         if point_size > 1:
             ix2, iy2, depth2, colors2 = self._expand(ix, iy, depth, colors, point_size, output_width, output_height)
-            bg_rgb, bg_alpha = self._zbuffer_pass(
+            bg_rgb, bg_alpha, depth_back = self._zbuffer_pass(
                 ix2, iy2, depth2, colors2, output_width, output_height, mode="back"
             )
-            # fill only where fg is empty but bg has data
+
+            # locate holes in the front buffer
             hole = (fg_alpha == 0) & (bg_alpha > 0)
+
+            # fill rgb+alpha
             fg_rgb[hole]   = bg_rgb[hole]
             fg_alpha[hole] = 1.0
+
+            # fill depth as well
+            flat_hole = hole.view(-1)
+            depth_front = depth_front.clone()
+            depth_front[flat_hole] = depth_back[flat_hole]
 
         # 4) package to (1, H, W, 3) [0–1] and (H, W)
         img  = fg_rgb.unsqueeze(0)
         mask = fg_alpha
+        depthmap = depth_front.view(output_height, output_width)
 
-        return img, mask
+        if return_inverse_depth:
+            depthmap = 1.0 / depthmap.clamp(min=1e-6)  # Avoid division by zero
+
+        return img, mask, depthmap.unsqueeze(0)
 
     def _project(self, coords, proj, fov):
         X, Y, Z = coords.unbind(1)
@@ -354,8 +379,12 @@ class ProjectPointCloud:
 
     def _zbuffer_pass(self, ix, iy, depth, colors, W, H, mode="front"):
         """
-        mode="front": keep nearest (amin)
-        mode="back":  keep farthest (amax)
+        mode="front": keep nearest (amin),
+        mode="back":  keep farthest (amax).
+        Returns:
+            rgb:   (H, W, 3),
+            alpha: (H, W),
+            depth_buffer: flat (H*W,) tensor of the selected depths
         """
         pix = iy * W + ix
         M   = W * H
@@ -365,25 +394,29 @@ class ProjectPointCloud:
         else:
             init, red = -float('inf'), 'amax'
 
-        depth_map = torch.full((M,), init, device=ix.device)
-        depth_map.scatter_reduce_(0, pix, depth, reduce=red, include_self=True)
+        # 1) construct empty depth‐buffer and scatter in your depths
+        depth_buffer = torch.full((M,), init, device=ix.device)
+        depth_buffer.scatter_reduce_(0, pix, depth, reduce=red, include_self=True)
 
-        sel = depth == depth_map[pix]
+        # 2) find which point “wins” per pixel
+        sel = depth == depth_buffer[pix]
         order = torch.arange(depth.shape[0], device=ix.device)
         order_m = torch.where(sel, order, torch.full_like(order, depth.shape[0]))
         best_o = torch.full((M,), depth.shape[0], device=ix.device)
         best_o.scatter_reduce_(0, pix, order_m, reduce='amin', include_self=True)
         win = order == best_o[pix]
 
+        # 3) scatter the winning colors into a flat RGBA image
         flat = torch.zeros((M,4), device=ix.device)
         flat[pix[win]] = colors[win]
 
+        # unpack
         img4 = flat.view(H, W, 4)
         rgb  = img4[..., :3].clamp(0,255)
         a    = (img4[..., 3] > 0).float()
         rgb *= a.unsqueeze(-1)
 
-        return rgb, a
+        return rgb, a, depth_buffer
 
 class DepthAwareInpainter:
     """
@@ -489,10 +522,344 @@ class DepthAwareInpainter:
         rgba = torch.cat([final_rgb, mask_map.unsqueeze(-1)], dim=2).unsqueeze(0)
         return (rgba[...,:-1],)
 
+class PointCloudUnion:
+    """
+    Combine two point clouds into one.
+    """
+    @classmethod
+    def INPUT_TYPES(cls) -> Dict[str, Any]:
+        return {
+            "required": {
+                "pointcloud1": ("TENSOR",),
+                "pointcloud2": ("TENSOR",),
+            }
+        }
+
+    RETURN_TYPES = ("TENSOR",)
+    FUNCTION = "union_pointclouds"
+    CATEGORY = "pointcloud"
+
+    def union_pointclouds(
+        self,
+        pointcloud1: torch.Tensor,
+        pointcloud2: torch.Tensor
+    ) -> Tuple[torch.Tensor]:
+        """
+        Combine two point clouds into one.
+        """
+        return (torch.cat([pointcloud1, pointcloud2], dim=0),)
+
+class DepthRenormalizer:
+    """
+    Renormalize a dense depth image to match a guidance depth image using L1 metric.
+    """
+    @classmethod
+    def INPUT_TYPES(cls) -> Dict[str, Any]:
+        return {
+            "required": {
+                "depth": ("IMAGE",),
+                "guidance_depth": ("IMAGE",),
+                "guidance_mask": ("IMAGE",),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "renormalize_depth"
+    CATEGORY = "depth"
+
+    def renormalize_depth(
+        self,
+        depth: torch.Tensor,
+        guidance_depth: torch.Tensor,
+        guidance_mask: torch.Tensor
+    ) -> Tuple[torch.Tensor]:
+        """
+        Renormalize `depth` so that on the masked pixels it matches the
+        mean/std of `guidance_depth`.  Mask may be single‐ or 3‐channel,
+        batched or not.
+        """
+        # --- Helper to collapse any IMAGE‐style tensor to [H,W] float ---
+        def to_hw(t: torch.Tensor) -> torch.Tensor:
+            # if batch dim
+            if t.dim() == 4 and t.shape[0] == 1:
+                t = t.squeeze(0)
+            # if CHW -> HWC
+            if t.dim() == 3 and t.shape[0] in (1,3):
+                t = t.permute(1,2,0)
+            # average across channel if more than 1
+            if t.dim() == 3 and t.shape[2] > 1:
+                t = t.mean(dim=2)
+            # if it’s still 2D HxW, good; if it’s 3D 1xHxW, squeeze
+            if t.dim() == 3 and t.shape[0] == 1:
+                t = t.squeeze(0)
+            return t.float()
+
+        # collapse everything to H×W
+        d   = to_hw(depth)
+        gd  = to_hw(guidance_depth)
+        m   = to_hw(guidance_mask)
+
+        # build boolean mask
+        mask = m > 0.5
+
+        # pick only masked pixels
+        gd_vals = gd[mask]
+        d_vals  = d[mask]
+
+        # if no valid pixels, skip renorm
+        if d_vals.numel() == 0:
+            return (depth,)
+
+        # compute scale & offset (L1 matching)
+        # small epsilon to avoid divide‐by‐zero
+        eps = 1e-6
+        scale  = (gd_vals.std(unbiased=False) + eps) / (d_vals.std(unbiased=False) + eps)
+        offset = gd_vals.mean() - d_vals.mean() * scale
+
+        # apply to full depth tensor
+        renorm = depth * scale + offset
+
+        # clamp to [0,1] (or change as you wish)
+        return (renorm.clamp(min=0.0, max=1.0),)
+
+class LoadPointCloud:
+    """
+    Load a PLY point‐cloud file from your ComfyUI input directory into a (N,7) tensor.
+    """
+    @classmethod
+    def INPUT_TYPES(cls):
+        input_dir = folder_paths.get_input_directory()
+        files = [
+            f for f in os.listdir(input_dir)
+            if os.path.isfile(os.path.join(input_dir, f)) and f.lower().endswith(".ply")
+        ]
+        return {
+            "required": {
+                "pointcloud_file": (
+                    sorted(files),
+                    {
+                        "file_chooser": True,
+                        "tooltip": "Select a .ply point‐cloud file to load from your input folder."
+                    }
+                ),
+            }
+        }
+
+    CATEGORY = "pointcloud"
+    RETURN_TYPES = ("TENSOR",)
+    FUNCTION = "load_pointcloud"
+    DESCRIPTION = "Loads a .ply point‐cloud file into a tensor of shape (N,7)."
+
+    def load_pointcloud(self, pointcloud_file: str):
+        # Resolve annotated (possibly versioned) filepath
+        file_path = folder_paths.get_annotated_filepath(pointcloud_file)
+
+        coords = []
+        colors = []
+        with open(file_path, 'r') as f:
+            # Skip header
+            line = f.readline().strip()
+            while not line.startswith("end_header"):
+                line = f.readline().strip()
+            # Now parse all vertex lines
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) < 7:
+                    continue
+                x, y, z = map(float, parts[0:3])
+                r, g, b, a = map(int, parts[3:7])
+                coords.append((x, y, z))
+                colors.append((r, g, b, a))
+
+        # Build a (N,7) numpy array then convert to torch.Tensor
+        np_coords  = np.array(coords,  dtype=np.float32)
+        np_colors  = np.array(colors,  dtype=np.float32)/255.0  # [0,1] range
+        # alpha 
+        combined   = np.concatenate([np_coords, np_colors], axis=1)
+        tensor_pc  = torch.from_numpy(combined)
+
+        return (tensor_pc,)
+
+    @classmethod
+    def IS_CHANGED(cls, pointcloud_file: str):
+        path = folder_paths.get_annotated_filepath(pointcloud_file)
+        m = hashlib.sha256()
+        with open(path, 'rb') as f:
+            m.update(f.read())
+        return m.digest().hex()
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, pointcloud_file: str):
+        if not folder_paths.exists_annotated_filepath(pointcloud_file):
+            return f"Invalid point‐cloud file: {pointcloud_file}"
+        return True
+
+class SavePointCloud:
+    """
+    Save a point cloud tensor (N,7) to a file in PLY format,
+    resolving into your ComfyUI output directory with a filename prefix.
+    """
+    def __init__(self):
+        # exactly like SaveImage
+        self.output_dir    = folder_paths.get_output_directory()
+        self.type          = "pointcloud"
+        self.prefix_append = ""   # you can set e.g. a suffix in the UI if you like
+
+    @classmethod
+    def INPUT_TYPES(cls) -> Dict[str, Any]:
+        return {
+            "required": {
+                "pointcloud":     ("TENSOR",),
+                "filename_prefix":(
+                    "STRING",
+                    {
+                        "default": "ComfyUIPointCloud",
+                        "tooltip": "Prefix for the .ply file. You can include format-tokens like %date:yyyy-MM-dd%."
+                    }
+                ),
+            },
+            "hidden": {}
+        }
+
+    RETURN_TYPES = ()
+    FUNCTION     = "save_pointcloud"
+    OUTPUT_NODE  = True
+    CATEGORY     = "pointcloud"
+    DESCRIPTION  = "Saves the input point cloud to your ComfyUI output directory."
+
+    def save_pointcloud(self, pointcloud: torch.Tensor, filename_prefix: str):
+        # apply any suffix from the node UI
+        filename_prefix += self.prefix_append
+
+        # ---- exactly the same pattern as SaveImage uses ----
+        # (we're abusing the image helper to get a folder, filename & counter)
+        full_output_folder, filename, counter, subfolder, filename_prefix = \
+            folder_paths.get_save_image_path(
+                filename_prefix,
+                self.output_dir,
+                # width/height are unused for .ply so just zero them
+                0, 0
+            )
+
+        # ensure the folder exists
+        os.makedirs(full_output_folder, exist_ok=True)
+
+        # build the final .ply filename
+        # note: SaveImage uses "%batch_num%" in filename, but for PC we just do one file
+        base_name = filename.replace("%batch_num%", "0")
+        ply_name  = f"{base_name}_{counter:05}.ply"
+        ply_path  = os.path.join(full_output_folder, ply_name)
+
+        # extract coords + colors
+        coords = pointcloud[:, :3].cpu().numpy()
+        colors = pointcloud[:, 3:].cpu().numpy().clip(0,1)
+
+        # write header + data
+        with open(ply_path, 'w') as f:
+            f.write("ply\n")
+            f.write("format ascii 1.0\n")
+            f.write(f"element vertex {coords.shape[0]}\n")
+            f.write("property float x\n")
+            f.write("property float y\n")
+            f.write("property float z\n")
+            f.write("property uchar red\n")
+            f.write("property uchar green\n")
+            f.write("property uchar blue\n")
+            f.write("property uchar alpha\n")
+            f.write("end_header\n")
+            for (x,y,z), (r,g,b,a) in zip(coords, colors):
+                f.write(f"{x} {y} {z} {int(r*255)} {int(g*255)} {int(b*255)} {int(a*255)}\n")
+
+        # update counter so next save increments
+        counter += 1
+
+        # return for the UI panel (so you see the saved files)
+        return {
+            "ui": {
+                "pointclouds": [{
+                    "filename": ply_name,
+                    "subfolder": subfolder,
+                    "type":      self.type
+                }]
+            }
+        }
+
+class CameraMotion:
+    """
+    A node to handle camera motion by interpolating between initial and final transformation matrices.
+    Emits a list of image tensors (C×H×W) suitable for SaveWebM.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls) -> Dict[str, Any]:
+        return {
+            "required": {
+                "pointcloud": ("TENSOR",),
+                "initial_matrix": ("MAT_4X4", {"default": None}),
+                "final_matrix": ("MAT_4X4", {"default": None}),
+                "num_frames": ("INT", {"default": 10, "min": 1, "max": 1000, "step": 1}),
+                "output_projection": (Projection.PROJECTIONS, {"tooltip": "Projection type for rendering"}),
+                "output_horizontal_fov": ("FLOAT", {"default": 90.0, "min": 0.0, "max": 360.0, "step": 1.0}),
+                "output_width": ("INT", {"default": 512, "min": 8, "max": 16384, "step": 8}),
+                "output_height": ("INT", {"default": 512, "min": 8, "max": 16384, "step": 8}),
+                "point_size": ("INT", {"default": 1, "min": 1, "max": 10, "step": 1}),
+            }
+        }
+
+    # Switch from a single stacked output to a list of images
+    RETURN_TYPES: Tuple[str] = ("IMAGE",)
+    FUNCTION: str = "generate_motion_frames"
+    CATEGORY: str = "pointcloud"
+
+    def generate_motion_frames(
+        self,
+        pointcloud: torch.Tensor,
+        initial_matrix: torch.Tensor,
+        final_matrix: torch.Tensor,
+        num_frames: int,
+        output_projection: str,
+        output_horizontal_fov: float,
+        output_width: int,
+        output_height: int,
+        point_size: int,
+    ) -> Tuple[torch.Tensor]:
+        """
+        Generate a sequence of frames by interpolating between initial and final matrices.
+        Returns a list of C×H×W image tensors.
+        """
+        # 1) build all intermediate camera matrices
+        ts = np.linspace(0, 1, num_frames)
+        matrices = [initial_matrix * (1 - t) + final_matrix * t for t in ts]
+
+        frames: List[npndarray] = []
+        for mat in matrices:
+            # 2) transform point cloud
+            transform_node = TransformPointCloud()
+            transformed_pc, = transform_node.transform_pointcloud(pointcloud, mat)
+
+            # 3) project to a 2D frame
+            project_node = ProjectPointCloud()
+            raw_frame, _, _ = project_node.project_pointcloud(
+                transformed_pc,
+                output_projection,
+                output_horizontal_fov,
+                output_width,
+                output_height,
+                point_size,
+            )
+            frames.append(raw_frame[0])
+        frames=torch.stack(frames, axis=0)
+        # Return as a list of images
+        return (frames,)
 
 NODE_CLASS_MAPPINGS = {
     "DepthToPointCloud": DepthToPointCloud,
     "TransformPointCloud": TransformPointCloud,
     "ProjectPointCloud": ProjectPointCloud,
     "DepthAwareInpainter": DepthAwareInpainter,
+    "PointCloudUnion": PointCloudUnion,
+    "DepthRenormalizer": DepthRenormalizer,
+    "LoadPointCloud": LoadPointCloud,
+    "SavePointCloud": SavePointCloud,
+    "CameraMotion": CameraMotion,
 }
