@@ -83,11 +83,29 @@ Showcases fisheye outpainting workflows. Example images:
 ### `PointCloud.json`
 Demonstrates point cloud manipulation and rendering. If depth is used, it is possible to move the camera freely and generate unpainted and outpainted images via point cloud.
 
+### `Test pointcloud_loading.json`
+This workflow demonstrates rendering camera movement from a point cloud. It showcases how to interpolate camera positions and generate dynamic visualizations. Example animation:
+
+<div style="display: flex;">
+  <img src="demo_images/Camera_interpolation_pointcloud.gif" alt="Camera Interpolation Pointcloud" width="50%" />
+</div>
+
+The whole workflow for view synthesis is combination of `pointcloud_inpaint.json` and `Pointcloud_enricher.json` . 
+
 ## Additional Requirements
 Some workflows require additional nodes from the following repositories:
 - [ComfyUI-DepthAnythingV2](https://github.com/kijai/ComfyUI-DepthAnythingV2)
 - [ComfyUI-Flux-Inpainting](https://github.com/rubi-du/ComfyUI-Flux-Inpainting)
 - [ComfyUI-Image-Filters](https://github.com/spacepxl/ComfyUI-Image-Filters) (for CV and morphology operations)
 
+
+
 ## Contributing
 Feel free to submit issues or pull requests to improve this repository. Contributions are welcome!
+
+## TODO List
+- Add processing to pointcloud or depthmap to remove outlier and lonely points at depth borders.
+- Use built-in comfyUI mask type an image.
+- Unite nodes into groups to simplify workflows.
+- Create a single workflow for view synthesis.
+- Implement easier and more flexible camera control - more complex camera movements with more than 2 points.
