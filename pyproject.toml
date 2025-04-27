@@ -1,0 +1,14 @@
+[project]
+name = "camera-comfyui"
+description = "ComfyUI nodes for the different projection models and camera movements"
+version = "1.0.0"
+license = {file = "LICENSE"}
+
+[project.urls]
+Repository = "https://github.com/Alexankharin/camera-comfyUI"
+#  Used by Comfy Registry https://comfyregistry.org
+
+[tool.comfy]
+PublisherId = ""
+DisplayName = "camera-comfyUI"
+Icon = ""
