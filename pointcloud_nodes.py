@@ -138,13 +138,14 @@ class DepthToPointCloud:
                 "invert_depth": ("BOOLEAN", {"default": False, "tooltip": "Invert the depth map values"}),
             },
             "optional": {
-                "depthmap": ("IMAGE",),
+                "depthmap": ("TENSOR",),
                 "mask": ("IMAGE",),
             }
         }
     RETURN_TYPES = ("TENSOR",)
+    RETURN_NAMES = ("pointcloud",)
     FUNCTION = "depth_to_pointcloud"
-    CATEGORY = "pointcloud"
+    CATEGORY = "Camera/pointcloud"
 
     def depth_to_pointcloud(
         self,
@@ -240,8 +241,9 @@ class TransformPointCloud:
             }
         }
     RETURN_TYPES = ("TENSOR",)
+    RETURN_NAMES = ("transformed pointcloud",)
     FUNCTION = "transform_pointcloud"
-    CATEGORY = "pointcloud"
+    CATEGORY = "Camera/pointcloud"
     
     def transform_pointcloud(
         self,
@@ -282,9 +284,10 @@ class ProjectPointCloud:
             }
         }
 
-    RETURN_TYPES = ("IMAGE", "MASK", "IMAGE")
+    RETURN_TYPES = ("IMAGE", "MASK", "TENSOR")
+    RETURN_NAMES = ("image", "mask", "depth tensor")
     FUNCTION     = "project_pointcloud"
-    CATEGORY     = "pointcloud"
+    CATEGORY     = "Camera/pointcloud"
 
     def project_pointcloud(
         self,
@@ -295,7 +298,7 @@ class ProjectPointCloud:
         output_height: int,
         point_size:    int = 1,
         return_inverse_depth: bool = False,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor]:
         device = pointcloud.device
         coords = pointcloud[:, :3]
         colors = pointcloud[:, 3:].float()  # assume [0–255]
@@ -418,110 +421,6 @@ class ProjectPointCloud:
 
         return rgb, a, depth_buffer
 
-class DepthAwareInpainter:
-    """
-    Inpaint holes in an RGB image using depth-aware argmax propagation over a provided mask.
-    When multiple fronts meet, preference is given to the path with greatest depth.
-    """
-    @classmethod
-    def INPUT_TYPES(cls) -> Dict[str, Any]:
-        return {
-            "required": {
-                "image":       ("IMAGE",),                         # RGB image as (1,H,W,3) or (H,W,3)
-                "mask":        ("IMAGE",),                         # binary mask to inpaint: 1=keep, 0=hole
-                "depthmap":    ("IMAGE",),                         # Depth map as various shapes
-                "kernel":      ("INT", {"default":5,  "min":3,  "max":21, "step":2, "tooltip":"Patch size k"}),
-                "max_iters":   ("INT", {"default":10, "min":1,  "max":100,"step":1, "tooltip":"Max passes"}),
-                "invert_depth":("BOOLEAN", {"default":False, "tooltip":"Invert the depth map (1/depth)"}),
-            }
-        }
-    RETURN_TYPES = ("IMAGE",)
-    FUNCTION = "depth_aware_inpaint"
-    CATEGORY = "inpainting"
-
-    def depth_aware_inpaint(
-        self,
-        image:       torch.Tensor,
-        mask:        torch.Tensor,
-        depthmap:    torch.Tensor,
-        kernel:      int,
-        max_iters:   int,
-        invert_depth:bool
-    ) -> Tuple[torch.Tensor]:
-        # unbatch and RGB extraction
-        img = image
-        if img.dim() == 4 and img.shape[0] == 1:
-            img = img.squeeze(0)
-        if img.shape[2] == 4:
-            img = img[..., :3]
-        H, W = img.shape[0], img.shape[1]
-        rgb = img
-
-        # mask -> curr_mask (H,W) float
-        m = mask
-        if m.dim() == 4 and m.shape[0] == 1:
-            m = m.squeeze(0)
-        if m.dim() == 3 and m.shape[2] == 3:
-            m = m[...,0]
-        curr_mask = (m>0).float()
-
-        # depthmap -> d (H,W)
-        d = depthmap
-        if d.dim() == 5 and d.shape[0]==1 and d.shape[1]==1:
-            d = d.squeeze(0).squeeze(0)
-        if d.dim() == 4 and d.shape[0]==1:
-            d = d.squeeze(0)
-        if d.dim() == 3:
-            d = d.mean(-1)
-        if invert_depth:
-            d = 1.0 / d.clamp(min=1e-6)
-        # original depth saved
-        orig_d = d.clone()
-        # initialize dynamic depth: holes=-1, known=orig_d
-        curr_depth = orig_d.masked_fill(curr_mask==0, -1.0)
-
-        # BxCxHxW tensors
-        rgb_t = rgb.permute(2,0,1).unsqueeze(0)          # (1,3,H,W)
-        depth_t = curr_depth.unsqueeze(0).unsqueeze(0)   # (1,1,H,W)
-
-        def fill_once(rgb_bchw, depth_bchw, mask_hw, k):
-            B,C,Hc,Wc = rgb_bchw.shape
-            pad = k//2
-            # unfold patches
-            rgb_p = F.unfold(rgb_bchw, k, padding=pad).view(B,C,k*k,Hc*Wc)
-            depth_p = F.unfold(depth_bchw, k, padding=pad).view(B,1,k*k,Hc*Wc)
-            # pick farthest neighbor by current depth
-            idx = depth_p.argmax(dim=2, keepdim=True)      # (1,1,k*k,H*W)
-            idx_rgb = idx.expand(-1,C,-1,-1)
-            cols = rgb_p.gather(2, idx_rgb).squeeze(2)     # (1,3,H*W)
-            # scatter only holes
-            out = rgb_bchw.view(B,C,Hc*Wc).clone()
-            holes = (mask_hw.view(Hc*Wc)==0)
-            out[:,:,holes] = cols[:,:,holes]
-            return out.view(B,C,Hc,Wc), idx, depth_p
-
-        out = rgb_t
-        mask_map = curr_mask
-        depth_map = curr_depth
-        for _ in range(max_iters):
-            prev_holes = (mask_map==0).sum()
-            out_new, idx_map, depth_patches = fill_once(out, depth_map.unsqueeze(0).unsqueeze(0), mask_map, kernel)
-            # newly filled positions
-            filled_img = out_new.squeeze(0).permute(1,2,0)
-            newly = (mask_map==0) & (filled_img.sum(dim=2)>0)
-            if not newly.any():
-                break
-            # update mask
-            mask_map[newly] = 1
-            # update depth_map at new positions from orig_d
-            depth_map[newly] = orig_d[newly]
-            out = out_new
-
-        # reconstruct RGBA
-        final_rgb = out.squeeze(0).permute(1,2,0)
-        rgba = torch.cat([final_rgb, mask_map.unsqueeze(-1)], dim=2).unsqueeze(0)
-        return (rgba[...,:-1],)
-
 class PointCloudUnion:
     """
     Combine two point clouds into one.
@@ -536,8 +435,9 @@ class PointCloudUnion:
         }
 
     RETURN_TYPES = ("TENSOR",)
+    RETURN_NAMES =("merged pointcloud",) 
     FUNCTION = "union_pointclouds"
-    CATEGORY = "pointcloud"
+    CATEGORY = "Camera/pointcloud"
 
     def union_pointclouds(
         self,
@@ -551,76 +451,77 @@ class PointCloudUnion:
 
 class DepthRenormalizer:
     """
-    Renormalize a dense depth image to match a guidance depth image using L1 metric.
+    Renormalize a depth tensor to match guidance depth at non-masked regions,
+    optionally in inverse-depth space.
     """
+
     @classmethod
     def INPUT_TYPES(cls) -> Dict[str, Any]:
         return {
             "required": {
-                "depth": ("IMAGE",),
-                "guidance_depth": ("IMAGE",),
-                "guidance_mask": ("IMAGE",),
+                "depth": ("TENSOR",),
+                "guidance_depth": ("TENSOR",),
+                "guidance_mask": ("MASK",),
+                "use_inverse": ("BOOLEAN", {"default": False, "tooltip": "Renormalize in inverse-depth (1/d) space"}),
             }
         }
 
-    RETURN_TYPES = ("IMAGE",)
+    RETURN_TYPES = ("TENSOR",)
+    RETURN_NAMES = ("depth tensor",)
     FUNCTION = "renormalize_depth"
-    CATEGORY = "depth"
+    CATEGORY = "Camera/depth"
 
     def renormalize_depth(
         self,
         depth: torch.Tensor,
         guidance_depth: torch.Tensor,
-        guidance_mask: torch.Tensor
+        guidance_mask: torch.Tensor,
+        use_inverse: bool = False
     ) -> Tuple[torch.Tensor]:
-        """
-        Renormalize `depth` so that on the masked pixels it matches the
-        mean/std of `guidance_depth`.  Mask may be single‐ or 3‐channel,
-        batched or not.
-        """
-        # --- Helper to collapse any IMAGE‐style tensor to [H,W] float ---
         def to_hw(t: torch.Tensor) -> torch.Tensor:
-            # if batch dim
             if t.dim() == 4 and t.shape[0] == 1:
                 t = t.squeeze(0)
-            # if CHW -> HWC
+            if t.dim() == 3 and t.shape[-1] == 1:
+                t = t.squeeze(-1)
             if t.dim() == 3 and t.shape[0] in (1,3):
                 t = t.permute(1,2,0)
-            # average across channel if more than 1
             if t.dim() == 3 and t.shape[2] > 1:
                 t = t.mean(dim=2)
-            # if it’s still 2D HxW, good; if it’s 3D 1xHxW, squeeze
-            if t.dim() == 3 and t.shape[0] == 1:
-                t = t.squeeze(0)
             return t.float()
 
-        # collapse everything to H×W
-        d   = to_hw(depth)
-        gd  = to_hw(guidance_depth)
-        m   = to_hw(guidance_mask)
-
-        # build boolean mask
+        # extract HxW arrays
+        d  = to_hw(depth)
+        gd = to_hw(guidance_depth)
+        m  = to_hw(guidance_mask)
         mask = m > 0.5
 
-        # pick only masked pixels
-        gd_vals = gd[mask]
-        d_vals  = d[mask]
+        # optionally work in inverse-depth
+        eps = 1e-6
+        if use_inverse:
+            d_work  = 1.0 / d.clamp(min=eps)
+            gd_work = 1.0 / gd.clamp(min=eps)
+        else:
+            d_work, gd_work = d, gd
 
-        # if no valid pixels, skip renorm
+        # select masked pixels
+        gd_vals = gd_work[mask]
+        d_vals  = d_work[mask]
         if d_vals.numel() == 0:
             return (depth,)
 
-        # compute scale & offset (L1 matching)
-        # small epsilon to avoid divide‐by‐zero
-        eps = 1e-6
+        # compute L1-based scale & offset
         scale  = (gd_vals.std(unbiased=False) + eps) / (d_vals.std(unbiased=False) + eps)
         offset = gd_vals.mean() - d_vals.mean() * scale
 
-        # apply to full depth tensor
-        renorm = depth * scale + offset
+        # apply and invert if needed
+        if use_inverse:
+            inv_renorm = (1.0 / depth.clamp(min=eps)) * scale + offset
+            renorm = 1.0 / inv_renorm.clamp(min=eps)
+        else:
+            renorm = depth * scale + offset
 
-        # clamp to [0,1] (or change as you wish)
-        return (renorm.clamp(min=0.0, max=1.0),)
+        return (renorm,)
+
 
 class LoadPointCloud:
     """
@@ -645,8 +546,9 @@ class LoadPointCloud:
             }
         }
 
-    CATEGORY = "pointcloud"
+    CATEGORY = "Camera/pointcloud"
     RETURN_TYPES = ("TENSOR",)
+    RETURN_NAMES = ("loaded pointcloud",)
     FUNCTION = "load_pointcloud"
     DESCRIPTION = "Loads a .ply point‐cloud file into a tensor of shape (N,7)."
 
@@ -724,7 +626,7 @@ class SavePointCloud:
     RETURN_TYPES = ()
     FUNCTION     = "save_pointcloud"
     OUTPUT_NODE  = True
-    CATEGORY     = "pointcloud"
+    CATEGORY     = "Camera/pointcloud"
     DESCRIPTION  = "Saves the input point cloud to your ComfyUI output directory."
 
     def save_pointcloud(self, pointcloud: torch.Tensor, filename_prefix: str):
@@ -808,8 +710,9 @@ class CameraMotion:
 
     # Switch from a single stacked output to a list of images
     RETURN_TYPES: Tuple[str] = ("IMAGE",)
+    RETURN_NAMES = ("motion frames",)
     FUNCTION: str = "generate_motion_frames"
-    CATEGORY: str = "pointcloud"
+    CATEGORY: str = "Camera/pointcloud"
 
     def generate_motion_frames(
         self,
@@ -856,7 +759,6 @@ NODE_CLASS_MAPPINGS = {
     "DepthToPointCloud": DepthToPointCloud,
     "TransformPointCloud": TransformPointCloud,
     "ProjectPointCloud": ProjectPointCloud,
-    "DepthAwareInpainter": DepthAwareInpainter,
     "PointCloudUnion": PointCloudUnion,
     "DepthRenormalizer": DepthRenormalizer,
     "LoadPointCloud": LoadPointCloud,
