@@ -5,6 +5,7 @@ from typing import Dict, Tuple, Any, List
 import math
 import os
 import folder_paths
+import open3d as o3d
 
 class Projection:
     """
@@ -686,74 +687,305 @@ class SavePointCloud:
             }
         }
 
-class CameraMotion:
+class CameraMotionNode:
     """
-    A node to handle camera motion by interpolating between initial and final transformation matrices.
-    Emits a list of image tensors (C×H×W) suitable for SaveWebM.
+    Renders a pointcloud sequence by interpolating along a trajectory.
+    Accepts:
+      • trajectory: (K,4,4)
+      • n_points:   INT frames per segment
     """
 
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "pointcloud":          ("TENSOR",),
+            "trajectory":          ("TENSOR",),   # (K,4,4)
+            "n_points":            ("INT",    {"default":10, "min":2, "step":1}),
+            "output_projection":   (Projection.PROJECTIONS, {}),
+            "output_horizontal_fov": ("FLOAT", {"default":90.0}),
+            "output_width":        ("INT",    {"default":512, "min":8}),
+            "output_height":       ("INT",    {"default":512, "min":8}),
+            "point_size":          ("INT",    {"default":1,   "min":1}),
+        }}
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("motion_frames",)
+    FUNCTION      = "generate_motion_frames"
+    CATEGORY      = "Camera/pointcloud"
+
+    def generate_motion_frames(
+        self,
+        pointcloud:            torch.Tensor,
+        trajectory:            torch.Tensor,
+        n_points:              int,
+        output_projection:     str,
+        output_horizontal_fov: float,
+        output_width:          int,
+        output_height:         int,
+        point_size:            int = 1
+    ) -> Tuple[torch.Tensor]:
+        # validate trajectory shape
+        if trajectory.dim() != 3 or trajectory.shape[1:] != (4,4):
+            raise ValueError(f"trajectory must be (K,4,4), got {trajectory.shape}")
+        K = trajectory.shape[0]
+        if K < 2:
+            raise ValueError("trajectory must contain at least two poses")
+
+        # build full list of interpolated extrinsics
+        all_mats = []
+        for i in range(K-1):
+            A = trajectory[i]
+            B = trajectory[i+1]
+            # uniform interpolation for this segment
+            ts = np.linspace(0.0, 1.0, n_points, endpoint=False)
+            for t in ts:
+                all_mats.append(A * (1.0 - t) + B * t)
+        # finally append the very last pose
+        all_mats.append(trajectory[-1])
+
+        full_traj = torch.stack(all_mats, dim=0)  # (T,4,4)
+
+        # render each pose
+        proj_node      = ProjectPointCloud()
+        transform_node = TransformPointCloud()
+        frames = []
+        for M in full_traj:
+            pc_t, = transform_node.transform_pointcloud(pointcloud, M)
+            img, _, _ = proj_node.project_pointcloud(
+                pc_t,
+                output_projection,
+                output_horizontal_fov,
+                output_width,
+                output_height,
+                point_size
+            )
+            frames.append(img[0])
+
+        # output as (T,H,W,3)
+        return (torch.stack(frames, dim=0),)
+
+class CameraInterpolationNode:
+    """
+    Wrap two 4×4 poses into a trajectory tensor. 
+    Outputs only `trajectory` (shape 2×4×4).
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "initial_matrix": ("MAT_4X4",),
+                "final_matrix":   ("MAT_4X4",),
+            }
+        }
+    RETURN_TYPES = ("TENSOR",)
+    RETURN_NAMES = ("trajectory",)
+    FUNCTION = "interpolate"
+    CATEGORY = "Camera/pointcloud"
+
+    def interpolate(
+        self,
+        initial_matrix: torch.Tensor,
+        final_matrix:   torch.Tensor,
+    ) -> Tuple[torch.Tensor]:
+        # stack into a (2,4,4) trajectory
+        # convert to tensor if needed
+        if isinstance(initial_matrix, np.ndarray):
+            initial_matrix = torch.from_numpy(initial_matrix).float()
+        if isinstance(final_matrix, np.ndarray):
+            final_matrix = torch.from_numpy(final_matrix).float()
+        traj = torch.stack([initial_matrix, final_matrix], dim=0)
+        return (traj,)
+
+class CameraTrajectoryNode:
+    """
+    Interactive tool to walk inside a pointcloud and select camera poses.
+    Outputs a trajectory tensor (K×4×4).
+    """
+    @classmethod
+    def INPUT_TYPES(cls) -> Dict[str, Any]:
+        return {"required": {
+            "pointcloud":    ("TENSOR",),
+            "initial_matrix": ("MAT_4X4", {"default": None}),
+        }}
+
+    RETURN_TYPES = ("TENSOR",)
+    RETURN_NAMES = ("trajectory",)
+    FUNCTION = "build_trajectory"
+    CATEGORY = "Camera/pointcloud"
+
+    def build_trajectory(
+        self,
+        pointcloud:     torch.Tensor,
+        initial_matrix: torch.Tensor = None
+    ) -> Tuple[torch.Tensor]:
+        # Launch GUI editor to select poses
+        if initial_matrix is None:
+            initial_matrix = torch.eye(4, device=pointcloud.device).float()
+        # convert to tensor if needed
+        if isinstance(initial_matrix, np.ndarray):
+            initial_matrix = torch.from_numpy(initial_matrix).float()
+        traj_list = launch_trajectory_editor(pointcloud, initial_matrix)
+        traj = torch.stack([torch.from_numpy(m).float() for m in traj_list], dim=0)
+        return (traj,)
+
+
+def launch_trajectory_editor(
+    pointcloud: torch.Tensor,
+    initial_matrix: torch.Tensor = None,
+    interp_steps: int = 10
+) -> List[np.ndarray]:
+    """
+    Opens an Open3D window to record camera waypoints with WSADZX controls and
+    returns an interpolated trajectory of extrinsic matrices.
+
+    Controls:
+    - W/S: zoom in/out (forward/backward)
+    - A/D: pan left/right
+    - Z/X: pan up/down
+    - P: record current pose
+    - Q: quit and close window
+
+    Args:
+      pointcloud: (N,≥3) tensor of points (and optional colors)
+      initial_matrix: optional 4×4 starting extrinsic
+      interp_steps: number of interpolation steps between waypoints
+    Returns:
+      interp_traj: list of 4×4 extrinsic matrices (numpy arrays)
+    """
+    # Build Open3D pointcloud geometry
+    pts = pointcloud[:, :3].cpu().numpy()
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(pts)
+    if pointcloud.shape[1] >= 6:
+        cols = pointcloud[:, 3:6].cpu().numpy()
+        pcd.colors = o3d.utility.Vector3dVector(cols)
+
+    # Initialize visualizer
+    vis = o3d.visualization.VisualizerWithKeyCallback()
+    vis.create_window(window_name="Trajectory Editor")
+    vis.add_geometry(pcd)
+    ctr = vis.get_view_control()
+    if initial_matrix is not None:
+        params = ctr.convert_to_pinhole_camera_parameters()
+        # ensure numpy array
+        mat = initial_matrix.cpu().numpy() if isinstance(initial_matrix, torch.Tensor) else initial_matrix
+        params.extrinsic = mat.copy()
+        ctr.convert_from_pinhole_camera_parameters(params)
+
+    traj_list: List[np.ndarray] = []
+    # Movement settings
+    pan_step = 50  # pixels
+    zoom_in_factor, zoom_out_factor = 0.9, 1.1
+
+    # Define movement callbacks
+    def move_forward(vis): vis.get_view_control().scale(zoom_in_factor); return False
+    def move_backward(vis): vis.get_view_control().scale(zoom_out_factor); return False
+    def move_left(vis): vis.get_view_control().translate(pan_step, 0); return False
+    def move_right(vis): vis.get_view_control().translate(-pan_step, 0); return False
+    def move_up(vis): vis.get_view_control().translate(0, -pan_step); return False
+    def move_down(vis): vis.get_view_control().translate(0, pan_step); return False
+
+    vis.register_key_callback(ord('W'), move_forward)
+    vis.register_key_callback(ord('S'), move_backward)
+    vis.register_key_callback(ord('A'), move_left)
+    vis.register_key_callback(ord('D'), move_right)
+    vis.register_key_callback(ord('Z'), move_up)
+    vis.register_key_callback(ord('X'), move_down)
+
+    # Record and quit callbacks
+    def record_pose(vis):
+        params = vis.get_view_control().convert_to_pinhole_camera_parameters()
+        traj_list.append(params.extrinsic.copy())
+        print(f"Recorded pose {len(traj_list)}")
+        return False
+
+    def close_vis(vis):
+        vis.destroy_window()
+        return True
+
+    vis.register_key_callback(ord('P'), record_pose)
+    vis.register_key_callback(ord('Q'), close_vis)
+
+    # Run the window loop
+    vis.run()
+
+    # Validate waypoints
+    if not traj_list:
+        raise ValueError("No waypoints recorded. Please record at least one.")
+    if len(traj_list) == 1:
+        traj_list.append(traj_list[0].copy())
+
+    # Interpolate between waypoints
+    interp_traj: List[np.ndarray] = []
+    for i in range(len(traj_list) - 1):
+        A, B = traj_list[i], traj_list[i + 1]
+        for t in np.linspace(0.0, 1.0, interp_steps, endpoint=False):
+            interp_traj.append(A * (1.0 - t) + B * t)
+    # Append final pose
+    interp_traj.append(traj_list[-1])
+
+    return interp_traj
+
+class PointCloudCleaner:
+    """
+    Cleans up the point cloud by removing points in voxels
+    that have fewer than `min_points_per_voxel` points.
+    This is O(N) with a single unique/counts pass.
+    """
     @classmethod
     def INPUT_TYPES(cls) -> Dict[str, Any]:
         return {
             "required": {
                 "pointcloud": ("TENSOR",),
-                "initial_matrix": ("MAT_4X4", {"default": None}),
-                "final_matrix": ("MAT_4X4", {"default": None}),
-                "num_frames": ("INT", {"default": 10, "min": 1, "max": 1000, "step": 1}),
-                "output_projection": (Projection.PROJECTIONS, {"tooltip": "Projection type for rendering"}),
-                "output_horizontal_fov": ("FLOAT", {"default": 90.0, "min": 0.0, "max": 360.0, "step": 1.0}),
-                "output_width": ("INT", {"default": 512, "min": 8, "max": 16384, "step": 8}),
-                "output_height": ("INT", {"default": 512, "min": 8, "max": 16384, "step": 8}),
-                "point_size": ("INT", {"default": 1, "min": 1, "max": 10, "step": 1}),
+                "voxel_size": ("FLOAT", {
+                    "default": 0.05, "min": 1e-4, "max": 1.0, "step": 1e-4,
+                    "tooltip": "Edge length of the cubic voxels"
+                }),
+                "min_points_per_voxel": ("INT", {
+                    "default": 3, "min": 1, "max": 100, "step": 1,
+                    "tooltip": "Minimum number of points in a voxel to keep it"
+                }),
             }
         }
 
-    # Switch from a single stacked output to a list of images
-    RETURN_TYPES: Tuple[str] = ("IMAGE",)
-    RETURN_NAMES = ("motion frames",)
-    FUNCTION: str = "generate_motion_frames"
-    CATEGORY: str = "Camera/pointcloud"
+    RETURN_TYPES = ("TENSOR",)
+    RETURN_NAMES = ("cleaned pointcloud",)
+    FUNCTION = "clean_pointcloud"
+    CATEGORY = "Camera/pointcloud"
 
-    def generate_motion_frames(
+    def clean_pointcloud(
         self,
         pointcloud: torch.Tensor,
-        initial_matrix: torch.Tensor,
-        final_matrix: torch.Tensor,
-        num_frames: int,
-        output_projection: str,
-        output_horizontal_fov: float,
-        output_width: int,
-        output_height: int,
-        point_size: int,
+        voxel_size: float,
+        min_points_per_voxel: int
     ) -> Tuple[torch.Tensor]:
         """
-        Generate a sequence of frames by interpolating between initial and final matrices.
-        Returns a list of C×H×W image tensors.
+        Remove all points that fall into voxels with fewer than
+        `min_points_per_voxel` points. Very fast and memory-light.
         """
-        # 1) build all intermediate camera matrices
-        ts = np.linspace(0, 1, num_frames)
-        matrices = [initial_matrix * (1 - t) + final_matrix * t for t in ts]
+        # [N,4+] → [N,3]
+        coords = pointcloud[:, :3]
+        device = coords.device
 
-        frames: List[npndarray] = []
-        for mat in matrices:
-            # 2) transform point cloud
-            transform_node = TransformPointCloud()
-            transformed_pc, = transform_node.transform_pointcloud(pointcloud, mat)
+        # 1) Compute integer voxel indices per point: [N,3]
+        #    floor(coords / voxel_size)
+        voxel_idx = torch.floor(coords / voxel_size).to(torch.int64)
 
-            # 3) project to a 2D frame
-            project_node = ProjectPointCloud()
-            raw_frame, _, _ = project_node.project_pointcloud(
-                transformed_pc,
-                output_projection,
-                output_horizontal_fov,
-                output_width,
-                output_height,
-                point_size,
-            )
-            frames.append(raw_frame[0])
-        frames=torch.stack(frames, axis=0)
-        # Return as a list of images
-        return (frames,)
+        # 2) Find unique voxels, get for each point its voxel-ID:
+        #    unique_voxel_coords: [M,3], inverse_idx: [N], counts: [M]
+        unique_voxels, inverse_idx, counts = torch.unique(
+            voxel_idx, return_inverse=True, return_counts=True, dim=0
+        )
+
+        # 3) Mark which voxels are “large” enough
+        good_voxel = counts >= min_points_per_voxel  # [M]
+
+        # 4) Keep only points whose voxel is good
+        keep_mask = good_voxel[inverse_idx]           # [N]
+
+        cleaned = pointcloud[keep_mask]
+        return (cleaned,)
 
 NODE_CLASS_MAPPINGS = {
     "DepthToPointCloud": DepthToPointCloud,
@@ -763,5 +995,8 @@ NODE_CLASS_MAPPINGS = {
     "DepthRenormalizer": DepthRenormalizer,
     "LoadPointCloud": LoadPointCloud,
     "SavePointCloud": SavePointCloud,
-    "CameraMotion": CameraMotion,
+    "CameraTrajectoryNode": CameraTrajectoryNode,
+    "CameraMotionNode": CameraMotionNode,
+    "CameraInterpolationNode": CameraInterpolationNode,
+    "PointCloudCleaner": PointCloudCleaner,
 }

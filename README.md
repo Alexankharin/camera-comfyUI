@@ -104,8 +104,8 @@ Some workflows require additional nodes from the following repositories:
 Feel free to submit issues or pull requests to improve this repository. Contributions are welcome!
 
 ## TODO List
-- Add processing to pointcloud or depthmap to remove outlier and lonely points at depth borders.
-- Use built-in comfyUI mask type an image.
-- Unite nodes into groups to simplify workflows.
-- Create a single workflow for view synthesis.
-- Implement easier and more flexible camera control - more complex camera movements with more than 2 points.
+- [ ] Add processing to pointcloud or depthmap to remove outlier and lonely points at depth borders.
+- [x] Use built-in comfyUI mask type an image.
+- [x] Unite nodes into groups to simplify workflows.
+- [ ] Create a single workflow for view synthesis.
+- [x] Implement easier and more flexible camera control - more complex camera movements with more than 2 points.

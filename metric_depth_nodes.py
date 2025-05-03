@@ -3,6 +3,7 @@ import numpy as np
 from PIL import Image
 from transformers import pipeline
 from typing import Dict, Any, Tuple
+import math
 
 # list of available HF depth-anything models
 possible_models = [
@@ -113,8 +114,72 @@ class DepthToImageNode:
         img = img.unsqueeze(0)
         return (img,)
 
+class ZDepthToRayDepthNode:
+    """
+    A ComfyUI node that converts a single-channel depth tensor into
+    a ray-depth tensor, taking into account the camera intrinsics.
+    Supports a pinhole camera model; additional input is horizontal FOV.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls) -> Dict[str, Any]:
+        return {
+            "required": {
+                "depth": ("TENSOR",),
+                "fov": ("FLOAT", {
+                    "default": 60.0, "min": 1.0, "max": 179.0, "step": 0.1,
+                    "tooltip": "Horizontal field of view in degrees"
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("TENSOR",)
+    RETURN_NAMES = ("ray depth",)
+    FUNCTION = "depth_to_ray_depth"
+    CATEGORY = "Camera/depth"
+
+    def depth_to_ray_depth(
+        self,
+        depth: torch.Tensor,
+        fov: float,
+    ) -> Tuple[torch.Tensor]:
+        # depth: [1, H, W, 1]  → squeeze out batch & channel dims → [H, W]
+        d = depth.clone().detach().squeeze(0).squeeze(-1)
+        H, W = d.shape
+        device = d.device
+
+        # Convert horizontal FOV to focal length (px)
+        fov_rad = fov * math.pi / 180.0
+        fx = W / (2.0 * math.tan(fov_rad / 2.0))
+        fy = fx  # assume square pixels
+
+        # Build pixel coordinate grids
+        u = torch.arange(W, device=device).float()
+        v = torch.arange(H, device=device).float()
+        grid_v, grid_u = torch.meshgrid(v, u, indexing="ij")
+
+        # Principal point at image center
+        cx = (W - 1) / 2.0
+        cy = (H - 1) / 2.0
+
+        # Normalized ray directions components
+        x = (grid_u - cx) / fx
+        y = (grid_v - cy) / fy
+
+        # Per-pixel ray-length factor = ||[x, y, 1]||
+        factor = torch.sqrt(1 + x**2 + y**2)
+
+        # Ray-depth = metric depth (z) × ray-length factor
+        ray_depth = d * factor  # → [H, W]
+
+        # Restore batch & channel dims → [1, H, W, 1]
+        ray_depth = ray_depth.unsqueeze(0).unsqueeze(-1)
+
+        return (ray_depth,)
+
 
 NODE_CLASS_MAPPINGS = {
     "DepthEstimatorNode": DepthEstimatorNode,
     "DepthToImageNode": DepthToImageNode,
+    "ZDepthToRayDepthNode": ZDepthToRayDepthNode,
 }
