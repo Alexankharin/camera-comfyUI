@@ -109,3 +109,5 @@ Feel free to submit issues or pull requests to improve this repository. Contribu
 - [x] Unite nodes into groups to simplify workflows.
 - [ ] Create a single workflow for view synthesis.
 - [x] Implement easier and more flexible camera control - more complex camera movements with more than 2 points.
+- [ ] Add more examples and documentation for each node.
+- [x] Add pointcloud union

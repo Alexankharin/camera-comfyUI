@@ -494,8 +494,9 @@ class DepthRenormalizer:
         d  = to_hw(depth)
         gd = to_hw(guidance_depth)
         m  = to_hw(guidance_mask)
+        H,W= d.shape
         mask = m > 0.5
-
+        mask= mask.view(H,W)
         # optionally work in inverse-depth
         eps = 1e-6
         if use_inverse:

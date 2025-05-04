@@ -418,8 +418,118 @@ class TransformToMatrixManual:
         ], dtype=np.float32)
         return matrix[None, ...]  # Add batch dimension
 
+class ReprojectDepth:
+    """
+    A node to reproject a depth tensor from one projection type to another,
+    and also return a mask of valid pixels.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls) -> Dict[str, Any]:
+        return {
+            "required": {
+                "depth": ("TENSOR",),
+                "input_horizontal_fov": ("FLOAT", {"default": 90.0, "min": 0.0, "max": 360.0, "step": 1.0}),
+                "output_horizontal_fov": ("FLOAT", {"default": 90.0, "min": 0.0, "max": 360.0, "step": 1.0}),
+                "input_projection": (Projection.PROJECTIONS, {"tooltip": "input projection type"}),
+                "output_projection": (Projection.PROJECTIONS, {"tooltip": "output projection type"}),
+                "output_width": ("INT", {"default": 0, "min": 0, "max": 16384, "step": 8}),
+                "output_height": ("INT", {"default": 0, "min": 0, "max": 16384, "step": 8}),
+                "transform_matrix": ("MAT_4X4", {"default": None}),
+                "inverse": ("BOOLEAN", {"default": False}),
+            }
+        }
+
+    # Now returns both depth and mask
+    RETURN_TYPES: Tuple[str, str] = ("TENSOR", "MASK")
+    RETURN_NAMES = ("reprojected_depth", "reprojected_mask")
+    FUNCTION: str = "reproject_depth"
+    CATEGORY: str = "Camera/reproject"
+
+    def reproject_depth(
+        self,
+        depth: torch.Tensor,
+        input_horizontal_fov: float,
+        output_horizontal_fov: float,
+        input_projection: str,
+        output_projection: str,
+        output_width: int,
+        output_height: int,
+        transform_matrix: np.ndarray = None,
+        inverse: bool = False,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Reproject a depth tensor and return a mask of valid pixels.
+
+        Returns:
+            reprojected_depth: torch.Tensor shaped [H_out, W_out] (or batch if provided)
+            reprojected_mask: torch.Tensor same shape, 1.0 where valid, 0.0 where out-of-bounds
+        """
+        # Prepare transform
+        device, dtype = depth.device, depth.dtype
+        if transform_matrix is None:
+            T = torch.eye(4, device=device, dtype=dtype)
+        else:
+            T = torch.from_numpy(transform_matrix).to(device=device, dtype=dtype).view(4, 4)
+        if inverse:
+            T = torch.inverse(T)
+
+        # Normalize dims
+        x = depth
+        added_batch = added_channel = False
+        if x.dim() == 2:
+            x = x.unsqueeze(0).unsqueeze(0); added_batch = added_channel = True
+        elif x.dim() == 3:
+            x = x.unsqueeze(0); added_batch = True
+        elif x.dim() == 4:
+            x = x.permute(0, 3, 1, 2)
+        else:
+            raise ValueError(f"Unsupported depth tensor with {x.dim()} dims")
+
+        B, C, H_in, W_in = x.shape
+        H_out = output_height if output_height > 0 else H_in
+        W_out = output_width  if output_width  > 0 else W_in
+
+        # Build grid and reproject
+        ys = torch.linspace(-1, 1, H_out, device=device)
+        xs = torch.linspace(-1, 1, W_out, device=device)
+        grid_y, grid_x = torch.meshgrid(ys, xs, indexing="ij")
+        grid = torch.stack((grid_x, grid_y), dim=-1)
+        grid = map_grid(grid, input_projection, output_projection,
+                        input_horizontal_fov, output_horizontal_fov, T)
+        grid = grid.unsqueeze(0)  # add batch
+
+        # Sample depth
+        sampled = torch.nn.functional.grid_sample(
+            x, grid, mode='nearest', padding_mode='border', align_corners=False
+        )
+
+        # Generate validity mask by sampling an all-ones tensor with zero padding
+        mask_in = torch.ones_like(x)
+        sampled_mask = torch.nn.functional.grid_sample(
+            mask_in, grid, mode='nearest', padding_mode='zeros', align_corners=False
+        )
+
+        # Squeeze back to remove added dims
+        if added_batch:
+            sampled = sampled.squeeze(0)
+            sampled_mask = sampled_mask.squeeze(0)
+        if added_channel:
+            sampled = sampled.squeeze(0)
+            sampled_mask = sampled_mask.squeeze(0)
+
+        # Convert depth back to original format
+        # sampled shape: [C, H_out, W_out] or [H_out, W_out] if single channel
+        reprojected_depth = sampled
+        reprojected_mask  = (sampled_mask > 0.5).float()
+        #print(f"Reprojected depth shape: {reprojected_depth.shape}")
+        #print(f"Reprojected mask shape: {reprojected_mask.shape}")
+        return reprojected_depth.permute(0,2,3,1), reprojected_mask
+
+
 NODE_CLASS_MAPPINGS = {
     "ReprojectImage": ReprojectImage,
     "TransformToMatrix": TransformToMatrix,
-    "TransformToMatrixManual": TransformToMatrixManual
+    "TransformToMatrixManual": TransformToMatrixManual,
+    "ReprojectDepth": ReprojectDepth
 }

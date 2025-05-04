@@ -4,6 +4,7 @@ from PIL import Image
 from transformers import pipeline
 from typing import Dict, Any, Tuple
 import math
+import torchvision
 
 # list of available HF depth-anything models
 possible_models = [
@@ -178,8 +179,127 @@ class ZDepthToRayDepthNode:
         return (ray_depth,)
 
 
+
+class CombineMode:
+    MODES = ["SRC", "DST", "AVERAGE", "SOFTMERGE"]
+
+class CombineDepthsNode:
+    """
+    A ComfyUI node that combines two single‐channel depth tensors according to two masks,
+    either by averaging, hard overlay (SRC or DST priority), or soft‐merge (smooth blending),
+    and returns both the blended depth and mask. All non‐spatial dims are flattened so that
+    combine logic works purely on H×W maps.
+    """
+    @classmethod
+    def INPUT_TYPES(cls) -> Dict[str, Any]:
+        return {
+            "required": {
+                "depthSRC": ("TENSOR",),
+                "maskSRC":  ("MASK",),
+                "depthDST": ("TENSOR",),
+                "maskDST":  ("MASK",),
+                "mode":     (CombineMode.MODES, {
+                    "default": "AVERAGE",
+                    "tooltip": "AVERAGE = mean; SRC/DST = hard overlay; SOFTMERGE = smooth blend"
+                }),
+                "invert_mask": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Flip masks (1→0, 0→1) before combining"
+                }),
+                "softmerge_radius": ("INT", {
+                    "default": 5, "min": 1, "max": 50, "step": 1,
+                    "tooltip": "Gaussian blur radius for SOFTMERGE mode"
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("TENSOR", "MASK")
+    RETURN_NAMES = ("combined depth", "combined mask")
+    FUNCTION = "combine_depths"
+    CATEGORY = "Camera/depth"
+
+    def combine_depths(
+        self,
+        depthSRC: torch.Tensor,
+        maskSRC: torch.Tensor,
+        depthDST: torch.Tensor,
+        maskDST: torch.Tensor,
+        mode: str,
+        invert_mask: bool,
+        softmerge_radius: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        # Validate input shapes
+        #if depthSRC.shape != depthDST.shape or maskSRC.shape != maskDST.shape or maskSRC.shape != depthSRC.shape:
+        #    raise ValueError("All inputs (depthSRC, depthDST, maskSRC, maskDST) must have the same shape")
+        orig_shape = depthSRC.shape
+        if len(orig_shape) < 2:
+            raise ValueError("Input tensors must have at least 2 dimensions (H, W)")
+
+        # Spatial dims
+        H, W = orig_shape[-3], orig_shape[-2]
+        # Flatten all leading dims (batch, channels, etc.) into one axis
+        batch = orig_shape[0]
+        # batch = int(np.prod(lead)) if lead else 1
+
+        # Reshape to (batch, H, W)
+        d0 = depthSRC.reshape(batch, H, W)
+        d1 = depthDST.reshape(batch, H, W)
+        m0 = maskSRC.reshape(batch, H, W)
+        m1 = maskDST.reshape(batch, H, W)
+        print("BHW are", batch, H, W)
+        # Optionally invert masks
+        if invert_mask:
+            m0 = 1.0 - m0
+            m1 = 1.0 - m1
+
+        eps = 1e-6
+        m0b = (m0 > 0.5).float()
+        m1b = (m1 > 0.5).float()
+        combined_m = ((m0b + m1b)>0.5).float()
+        if mode == "AVERAGE":
+            combined_d = d0*m0 + d1*m1
+            combined_d = combined_d / (m0 + m1 + eps)
+
+        elif mode in ("SRC", "DST"):  
+            avg = 0.5 * (d0 + d1)
+            combined_d = (
+                m0b * d0 +
+                m1b * d1 +
+                (1 - m0b - m1b).clamp(min=0) * avg
+            )
+            overlap = m0b * m1b
+            if mode == "SRC":
+                combined_d = overlap * d0 + (1 - overlap) * combined_d
+            else:
+                combined_d = overlap * d1 + (1 - overlap) * combined_d
+
+        else:  # SOFTMERGE
+            # prepare for gaussian blur: reshape to (batch,1,H,W)
+            m0v = m0.unsqueeze(1)
+            m1v = m1.unsqueeze(1)
+            k = 2 * softmerge_radius + 1
+            sigma = float(softmerge_radius)
+            # apply Gaussian blur
+            m0_blur = torchvision.transforms.functional.gaussian_blur(m0v, (k, k), sigma=(sigma, sigma)).squeeze(1)
+            m1_blur = torchvision.transforms.functional.gaussian_blur(m1v, (k, k), sigma=(sigma, sigma)).squeeze(1)
+            # blur only overlapping regions
+            mask_blur = ((m0_blur>0) * (m1_blur>0)).float()
+            wsum = m0_blur*mask_blur+ m1_blur*mask_blur + (1-mask_blur)
+            combined_d = (d0 * m0_blur + d1 * m1_blur)/ wsum
+            average_d=(d0*m0 + d1*m1)/(m0 + m1 + (1-combined_m))*combined_m
+            combined_d = combined_d*mask_blur + average_d*(1-mask_blur)
+            # soft mask = normalized sum, clamped to [0,1]
+        
+        combined_d=combined_d*combined_m
+        # Restore original leading dims
+        combined_d = combined_d.reshape(batch, H, W)
+        combined_m = combined_m.reshape(batch, H, W)
+        # Return depth tensor (float32) and mask tensor (float)
+        return combined_d.unsqueeze(-1), combined_m.unsqueeze(1)
+
 NODE_CLASS_MAPPINGS = {
     "DepthEstimatorNode": DepthEstimatorNode,
     "DepthToImageNode": DepthToImageNode,
     "ZDepthToRayDepthNode": ZDepthToRayDepthNode,
+    "CombineDepthsNode": CombineDepthsNode,
 }
