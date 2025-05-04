@@ -123,26 +123,31 @@ def project_first_hit(volume_sparse: torch.Tensor) -> Tuple[torch.Tensor, torch.
 # ==== Node Definitions ==== #
 class DepthToPointCloud:
     """
-    Convert an (optional) depth map and RGB(A) image into a single pointcloud tensor of shape (N,7) [X,Y,Z,R,G,B,A].
+    Convert an (optional) depth map and RGB(A) image into a single pointcloud
+    tensor of shape (N,7) [X,Y,Z,R,G,B,A], optionally masking out points.
     """
     @classmethod
     def INPUT_TYPES(cls) -> Dict[str, Any]:
-        """
-        Define the input types for the node.
-        """
         return {
             "required": {
-                "image": ("IMAGE",),
-                "input_projection": (Projection.PROJECTIONS, {"tooltip": "projection type of depth map"}),
-                "input_horizontal_fov": ("FLOAT", {"default": 90.0, "min": 0.0, "max": 360.0, "step": 1.0}),
-                "depth_scale": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1000.0, "step": 0.1, "tooltip": "Scale factor for depth values"}),
-                "invert_depth": ("BOOLEAN", {"default": False, "tooltip": "Invert the depth map values"}),
+                "image":               ("IMAGE",),
+                "input_projection":    (Projection.PROJECTIONS, {"tooltip": "projection type of depth map"}),
+                "input_horizontal_fov":("FLOAT", {
+                    "default": 90.0, "min": 0.0, "max": 360.0, "step": 1.0,
+                    "tooltip": "Horizontal field of view in degrees"}),
+                "depth_scale":         ("FLOAT", {
+                    "default": 1.0, "min": 0.0, "max": 1000.0, "step": 0.1,
+                    "tooltip": "Scale factor for depth values"}),
+                "invert_depth":        ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Invert the depth map values"}),
             },
             "optional": {
                 "depthmap": ("TENSOR",),
-                "mask": ("IMAGE",),
+                "mask":     ("MASK",),
             }
         }
+
     RETURN_TYPES = ("TENSOR",)
     RETURN_NAMES = ("pointcloud",)
     FUNCTION = "depth_to_pointcloud"
@@ -153,76 +158,84 @@ class DepthToPointCloud:
         image: torch.Tensor,
         input_projection: str,
         input_horizontal_fov: float,
-        invert_depth: bool,
         depth_scale: float,
-        depthmap: torch.Tensor = None, # BHWC or HWC
+        invert_depth: bool,
+        depthmap: torch.Tensor = None,
         mask: torch.Tensor = None
     ) -> Tuple[torch.Tensor]:
-        """
-        Convert depth map and image to a point cloud.
-        """
-        # ----- handle image tensor -----
+        # --- Prepare image (C,H,W) ---
         img = image
-        # if batched
-        if img.dim() == 4:
+        if img.dim() == 4:                      # [1,H,W,C] or [B,H,W,C]
             img = img.squeeze(0)
-        # convert NHWC to NCHW or HWC to CHW
-        if img.dim() == 3 and img.shape[2] in (3,4):  # H,W,C
+        if img.dim() == 3 and img.shape[-1] in (3,4):  # [H,W,C]
             img = img.permute(2,0,1)
-        # now img is (C,H,W)
         C, H, W = img.shape
 
-        # ----- handle depth tensor -----
+        # --- Prepare depth (H,W) ---
         if depthmap is None:
             depth = torch.ones((H, W), device=img.device)
         else:
-            d = depthmap            
-            if d.dim() == 4:
-                d = d.squeeze(0).mean(-1)  # BHWC -> HW
-            # collapse channel dim
-            elif d.dim() == 3: # HWC-> HW
-                d= d.mean(-1)  # HWC -> HW            
-            # now d is (H_d, W_d)
-            elif d.dim() == 2:
-                d=d # WH
+            d = depthmap
+            if d.dim() == 4:                  # [1,H,W,1] or [B,H,W,1]
+                d = d.squeeze(0).squeeze(-1)
+            elif d.dim() == 3 and d.shape[-1] == 1:  # [H,W,1]
+                d = d.squeeze(-1)
+            elif d.dim() == 3:               # [H,W,C]
+                d = d.mean(dim=-1)
+            # now d is [H_d, W_d]
             H_d, W_d = d.shape
             if (H_d, W_d) != (H, W):
-                d = F.interpolate(d.unsqueeze(0).unsqueeze(0), size=(H, W), mode='bilinear', align_corners=False)
-                d = d.squeeze(0).squeeze(0)
+                d = F.interpolate(
+                    d.unsqueeze(0).unsqueeze(0),
+                    size=(H, W),
+                    mode='bilinear',
+                    align_corners=False
+                ).squeeze(0).squeeze(0)
             depth = d
-                   # ----- apply depth inversion and scaling -----
+
+        # invert & scale
         if invert_depth:
-            depth = 1.0 / depth.clamp(min=1e-6)  # Avoid division by zero
-            depth = depth.clamp(max=1000.0)     # Clamp to avoid inf values
+            depth = 1.0 / depth.clamp(min=1e-6)
         depth = depth * depth_scale
-    
-        # ----- convert to XYZ -----
+
+        # --- Depth → XYZ ---
         if input_projection == "PINHOLE":
             X, Y, Z = pinhole_depth_to_XYZ(depth, input_horizontal_fov)
         elif input_projection == "FISHEYE":
             X, Y, Z = fisheye_depth_to_XYZ(depth, input_horizontal_fov)
         else:
             X, Y, Z = equirect_depth_to_XYZ(depth, input_horizontal_fov)
-
         coords = torch.stack([X, Y, Z], dim=-1).reshape(-1, 3)
 
-        # ----- extract colors -----
-        rgba = img.permute(1,2,0).float()  # H,W,C
-        # add alpha if missing
+        # --- Extract colors RGBA → (H,W,4) then flatten ---
+        rgba = img.permute(1,2,0).float()  # [H,W,C]
         if C == 3:
-            alpha = torch.ones((H, W, 1), device=rgba.device)*1
+            alpha = torch.ones((H, W, 1), device=rgba.device)
             rgba = torch.cat([rgba, alpha], dim=2)
         colors = rgba.reshape(-1, 4)
 
-        # ----- apply mask if given -----
+        # --- Apply mask if provided ---
         if mask is not None:
-            mask = mask.squeeze(0).mean(-1) if mask.dim() == 4 else mask.mean(-1) if mask.dim() == 3 else mask
-            mask = F.interpolate(mask.unsqueeze(0).unsqueeze(0), size=(H, W), mode='bilinear', align_corners=False).squeeze(0).squeeze(0)
-            mask = mask > 0.5
-            coords = coords[mask.view(-1)]
-            colors = colors[mask.view(-1)]
+            m = mask
+            # collapse any batch/channel dims
+            if m.dim() == 4:
+                m = m.squeeze(0).mean(dim=-1)
+            elif m.dim() == 3:
+                m = m.mean(dim=-1)
+            # resize to [H,W]
+            if m.shape[-2:] != (H, W):
+                m = F.interpolate(
+                    m.unsqueeze(0).unsqueeze(0),
+                    size=(H, W),
+                    mode='bilinear',
+                    align_corners=False
+                ).squeeze(0).squeeze(0)
+            m_bool = m > 0.5
+            keep = m_bool.reshape(-1)
+            coords = coords[keep]
+            colors = colors[keep]
 
-        # ----- concat into pointcloud -----
+        # --- Build pointcloud [N,7] ---
         pointcloud = torch.cat([coords, colors], dim=1)
         return (pointcloud,)
 
