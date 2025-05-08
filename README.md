@@ -11,10 +11,45 @@ This repository contains custom nodes for ComfyUI, designed to handle various pr
 - Example workflows to demonstrate functionality.
 
 ## Installation
-1. Clone this repository directly into the `custom_nodes` folder of your ComfyUI installation directory:
+
+1. **Clone the repository**
+   
+   Place this repository in your ComfyUI `custom_nodes` directory:
    ```bash
-   git clone https://github.com/your-repo/camera-comfyUI.git custom_nodes/camera
+   git clone https://github.com/your-repo/camera-comfyUI.git custom_nodes/camera-comfyUI
    ```
+
+2. **Install Python dependencies**
+   
+   Make sure you are using Python 3.12.x (the version used by ComfyUI). Then install the required packages:
+   ```bash
+   pip install -r custom_nodes/camera-comfyUI/requirements.txt
+   ```
+   - `open3d` is optional and only needed for point cloud visualization.
+
+3. **Install additional required nodes**
+   
+   Some workflows require extra custom nodes for full functionality:
+   - [ComfyUI-Flux-Inpainting](https://github.com/rubi-du/ComfyUI-Flux-Inpainting) (required for flux-based inpainting)
+   - [ComfyUI-Image-Filters](https://github.com/spacepxl/ComfyUI-Image-Filters) (for image processing and morphology operations)
+   - [Other custom nodes as needed for your workflow]
+
+4. **Flux-based inpainting setup**
+   
+   Outpainting/inpainting nodes use Flux Inpainting for best results. You must log in to HuggingFace to access the required models:
+   ```bash
+   pip install huggingface_hub
+   huggingface-cli login
+   ```
+   Enter your HuggingFace token when prompted.
+
+5. **Restart ComfyUI**
+   
+   After installation, restart ComfyUI to load the new nodes.
+
+6. **Example workflows**
+   
+   Example workflows are provided in the `workflows/` folder. See the README for details.
 
 ## Node Categories
 
@@ -128,7 +163,6 @@ The whole workflow for view synthesis is combination of `pointcloud_inpaint.json
 
 ## Additional Requirements
 Some workflows require additional nodes from the following repositories:
-- [ComfyUI-DepthAnythingV2](https://github.com/kijai/ComfyUI-DepthAnythingV2)
 - [ComfyUI-Flux-Inpainting](https://github.com/rubi-du/ComfyUI-Flux-Inpainting)
 - [ComfyUI-Image-Filters](https://github.com/spacepxl/ComfyUI-Image-Filters) (for CV and morphology operations)
 
