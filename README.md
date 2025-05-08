@@ -30,6 +30,40 @@ These nodes enable working with point clouds and depth maps. They include:
 - **TransformPointCloud**: Applies a 4x4 transformation matrix to a point cloud.
 - **ProjectPointCloud**: Projects a point cloud back into an image and mask using z-buffering.
 
+## Node Reference
+
+### Matrix Transformation Nodes
+
+- **TransformToMatrix**: Generates a 4x4 transformation matrix from translation (shiftX, shiftY, shiftZ) and rotation (theta, phi) parameters. Used for camera movement and reprojection.
+- **TransformToMatrixManual**: Allows manual entry of all 16 elements of a 4x4 transformation matrix for advanced camera or point cloud transformations.
+
+### Reprojection-Related Nodes
+
+- **ReprojectImage**: Reprojects an image from one camera model/projection (Pinhole, Fisheye, Equirectangular) to another, with support for field of view, rotation, and optional masking.
+- **ReprojectDepth**: Reprojects a depth map between different camera models and projections, similar to ReprojectImage but for depth data.
+- **OutpaintAnyProjection**: Extracts a patch from an image in any projection, performs outpainting (optionally using Flux Inpainting), and reprojects the result back. Useful for filling missing regions in arbitrary camera views.
+
+### Depth-Related Nodes
+
+- **DepthEstimatorNode**: Runs depth estimation using HuggingFace Depth-Anything models, producing a metric depth tensor from an input image.
+- **DepthToImageNode**: Converts a single-channel depth tensor into a normalized grayscale image for visualization, with optional inversion.
+- **ZDepthToRayDepthNode**: Converts a z-buffer depth map to a ray-depth map, accounting for camera intrinsics (pinhole model, horizontal FOV).
+- **CombineDepthsNode**: Combines two depth maps and their masks using various modes (average, overlay, soft merge), returning a blended depth and mask.
+- **DepthRenormalizer**: Adjusts a depth tensor to match another (guidance) depth in non-masked regions, optionally in inverse-depth space.
+
+### Pointcloud-Related Nodes
+
+- **DepthToPointCloud**: Converts a depth map (and optional RGB(A) image and mask) into a point cloud tensor (N,7: X, Y, Z, R, G, B, A), supporting multiple projections.
+- **TransformPointCloud**: Applies a 4x4 transformation matrix to a point cloud, enabling camera movement or alignment.
+- **ProjectPointCloud**: Projects a point cloud back into an image and mask using z-buffering, with adjustable point size and support for different projections.
+- **PointCloudUnion**: Merges two point clouds into one, concatenating their points.
+- **LoadPointCloud**: Loads a PLY point cloud file from the ComfyUI input directory into a tensor.
+- **SavePointCloud**: Saves a point cloud tensor to a PLY file in the ComfyUI output directory, with customizable filename prefix.
+- **CameraMotionNode**: Renders a sequence of images by interpolating camera poses along a trajectory and projecting the point cloud for each pose.
+- **CameraInterpolationNode**: Creates a trajectory tensor from two 4x4 camera poses, for use in camera animation or interpolation.
+- **CameraTrajectoryNode**: Interactive tool to select and record multiple camera poses in a point cloud, outputting a trajectory tensor for animation.
+- **PointCloudCleaner**: Removes outlier or isolated points from a point cloud by voxelizing and filtering based on minimum points per voxel.
+
 ## Usage
 1. **Reprojection Nodes**:
    - Use the `ReprojectImage` node to reproject images between different camera models and projections.
