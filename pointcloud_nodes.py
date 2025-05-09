@@ -5,7 +5,19 @@ from typing import Dict, Tuple, Any, List
 import math
 import os
 import folder_paths
-import open3d as o3d
+import logging
+# Try importing open3d and its visualization modules; log a warning if not found
+try:
+    import open3d as o3d
+    import open3d.visualization.gui as gui
+    import open3d.visualization.rendering as rendering
+    _open3d_import_error = None
+except ImportError as e:
+    o3d = None
+    gui = None
+    rendering = None
+    _open3d_import_error = e
+    logging.warning("[camera-comfyUI] open3d is not installed. Point cloud visualization features will be unavailable. Error: %s", e)
 
 class Projection:
     """
@@ -717,8 +729,8 @@ class CameraMotionNode:
             "n_points":            ("INT",    {"default":10, "min":2, "step":1}),
             "output_projection":   (Projection.PROJECTIONS, {}),
             "output_horizontal_fov": ("FLOAT", {"default":90.0}),
-            "output_width":        ("INT",    {"default":512, "min":8}),
-            "output_height":       ("INT",    {"default":512, "min":8}),
+            "output_width":        ("INT",    {"default":512, "min":8, "max":8192}),
+            "output_height":       ("INT",    {"default":512, "min":8, "max":8192}),
             "point_size":          ("INT",    {"default":1,   "min":1}),
         }}
 
@@ -811,6 +823,8 @@ class CameraInterpolationNode:
         traj = torch.stack([initial_matrix, final_matrix], dim=0)
         return (traj,)
 
+
+
 class CameraTrajectoryNode:
     """
     Interactive tool to walk inside a pointcloud and select camera poses.
@@ -833,10 +847,9 @@ class CameraTrajectoryNode:
         pointcloud:     torch.Tensor,
         initial_matrix: torch.Tensor = None
     ) -> Tuple[torch.Tensor]:
-        # Launch GUI editor to select poses
+        # Default camera extrinsic = identity (origin, looking +Z)
         if initial_matrix is None:
             initial_matrix = torch.eye(4, device=pointcloud.device).float()
-        # convert to tensor if needed
         if isinstance(initial_matrix, np.ndarray):
             initial_matrix = torch.from_numpy(initial_matrix).float()
         traj_list = launch_trajectory_editor(pointcloud, initial_matrix)
@@ -846,100 +859,107 @@ class CameraTrajectoryNode:
 
 def launch_trajectory_editor(
     pointcloud: torch.Tensor,
-    initial_matrix: torch.Tensor = None,
+    initial_matrix: torch.Tensor,
     interp_steps: int = 10
 ) -> List[np.ndarray]:
     """
-    Opens an Open3D window to record camera waypoints with WSADZX controls and
-    returns an interpolated trajectory of extrinsic matrices.
-
-    Controls:
-    - W/S: zoom in/out (forward/backward)
-    - A/D: pan left/right
-    - Z/X: pan up/down
-    - P: record current pose
-    - Q: quit and close window
-
-    Args:
-      pointcloud: (N,≥3) tensor of points (and optional colors)
-      initial_matrix: optional 4×4 starting extrinsic
-      interp_steps: number of interpolation steps between waypoints
-    Returns:
-      interp_traj: list of 4×4 extrinsic matrices (numpy arrays)
+    Launches an Open3D VisualizerWithKeyCallback window to navigate the pointcloud.
+    Returns interpolated list of extrinsic matrices.
     """
-    # Build Open3D pointcloud geometry
-    pts = pointcloud[:, :3].cpu().numpy()
+    # Prepare pointcloud
+    pts = pointcloud[:, :3].cpu().numpy()  # [m] to [cm]
+    # clip each coordinate to 90 percentile of the whole pointcloud
+    # (this is a bit arbitrary, but it works well for most pointclouds)
+    clip = np.percentile(pts, 90, axis=0)
+    pts = np.clip(pts, -clip, clip)
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(pts)
     if pointcloud.shape[1] >= 6:
-        cols = pointcloud[:, 3:6].cpu().numpy()
-        pcd.colors = o3d.utility.Vector3dVector(cols)
+        pcd.colors = o3d.utility.Vector3dVector(pointcloud[:,3:6].cpu().numpy())
 
-    # Initialize visualizer
+    # Compute centroid
+    centroid = pcd.get_center()
+
+    # Visualizer
     vis = o3d.visualization.VisualizerWithKeyCallback()
-    vis.create_window(window_name="Trajectory Editor")
+    vis.create_window(
+        window_name=(
+            "Trajectory Editor | WSAD: pan | Z/X: zoom | P: record pose | Q: quit"
+        ),
+        width=1024, height=768
+    )
     vis.add_geometry(pcd)
     ctr = vis.get_view_control()
-    if initial_matrix is not None:
-        params = ctr.convert_to_pinhole_camera_parameters()
-        # ensure numpy array
-        mat = initial_matrix.cpu().numpy() if isinstance(initial_matrix, torch.Tensor) else initial_matrix
-        params.extrinsic = mat.copy()
-        ctr.convert_from_pinhole_camera_parameters(params)
+
+    # 1) Center camera at the point-cloud centroid
+    ctr.set_lookat(centroid)
+    # 2) Look straight along +Z
+    ctr.set_front((0.0, 0.0, 1.0))
+    # 3) Choose a conventional 'up' vector
+    ctr.set_up((0.0, -1.0, 0.0))
+    # 4) Zoom very close (smaller = closer)
+    ctr.set_zoom(0.2)
+
+    # If you still want to apply a user-provided initial_matrix, you can
+    # uncomment these two lines—but they’ll override the “look‐down‐Z”
+    # params above.
+    params = ctr.convert_to_pinhole_camera_parameters()
+    params.extrinsic = initial_matrix.cpu().numpy().copy(); ctr.convert_from_pinhole_camera_parameters(params)
+
+    # controls: slower pan and zoom
+    pan_step  = 0.01   # meters per keypress
+    zoom_step = 0.95   # factor <1 = zoom in, >1 = zoom out
 
     traj_list: List[np.ndarray] = []
-    # Movement settings
-    pan_step = 50  # pixels
-    zoom_in_factor, zoom_out_factor = 0.9, 1.1
 
-    # Define movement callbacks
-    def move_forward(vis): vis.get_view_control().scale(zoom_in_factor); return False
-    def move_backward(vis): vis.get_view_control().scale(zoom_out_factor); return False
-    def move_left(vis): vis.get_view_control().translate(pan_step, 0); return False
-    def move_right(vis): vis.get_view_control().translate(-pan_step, 0); return False
-    def move_up(vis): vis.get_view_control().translate(0, -pan_step); return False
-    def move_down(vis): vis.get_view_control().translate(0, pan_step); return False
+    # Define callbacks
+    def pan_forward(vis):  vis.get_view_control().translate(0,  pan_step);      return False
+    def pan_backward(vis): vis.get_view_control().translate(0, -pan_step);      return False
+    def pan_left(vis):     vis.get_view_control().translate( pan_step, 0);      return False
+    def pan_right(vis):    vis.get_view_control().translate(-pan_step, 0);      return False
+    def zoom_in(vis):      vis.get_view_control().scale(zoom_step);             return False
+    def zoom_out(vis):     vis.get_view_control().scale(1/zoom_step);           return False
 
-    vis.register_key_callback(ord('W'), move_forward)
-    vis.register_key_callback(ord('S'), move_backward)
-    vis.register_key_callback(ord('A'), move_left)
-    vis.register_key_callback(ord('D'), move_right)
-    vis.register_key_callback(ord('Z'), move_up)
-    vis.register_key_callback(ord('X'), move_down)
-
-    # Record and quit callbacks
     def record_pose(vis):
-        params = vis.get_view_control().convert_to_pinhole_camera_parameters()
-        traj_list.append(params.extrinsic.copy())
-        print(f"Recorded pose {len(traj_list)}")
+        extr = vis.get_view_control() \
+                  .convert_to_pinhole_camera_parameters() \
+                  .extrinsic.copy()
+        traj_list.append(extr)
+        print(f"[Trajectory Editor] Recorded pose {len(traj_list)}")
         return False
 
-    def close_vis(vis):
+    def close(vis):
         vis.destroy_window()
         return True
 
+    # Register keys
+    vis.register_key_callback(ord('W'), pan_forward)
+    vis.register_key_callback(ord('S'), pan_backward)
+    vis.register_key_callback(ord('A'), pan_left)
+    vis.register_key_callback(ord('D'), pan_right)
+    vis.register_key_callback(ord('Z'), zoom_in)
+    vis.register_key_callback(ord('X'), zoom_out)
     vis.register_key_callback(ord('P'), record_pose)
-    vis.register_key_callback(ord('Q'), close_vis)
+    vis.register_key_callback(ord('Q'), close)
 
-    # Run the window loop
+    # Run the window
     vis.run()
 
-    # Validate waypoints
+    # Ensure at least two poses
     if not traj_list:
-        raise ValueError("No waypoints recorded. Please record at least one.")
+        raise ValueError("No waypoints recorded. Please record at least one with 'P'.")
     if len(traj_list) == 1:
         traj_list.append(traj_list[0].copy())
 
-    # Interpolate between waypoints
-    interp_traj: List[np.ndarray] = []
-    for i in range(len(traj_list) - 1):
-        A, B = traj_list[i], traj_list[i + 1]
+    # Interpolate between each pair
+    interp: List[np.ndarray] = []
+    for A, B in zip(traj_list[:-1], traj_list[1:]):
         for t in np.linspace(0.0, 1.0, interp_steps, endpoint=False):
-            interp_traj.append(A * (1.0 - t) + B * t)
-    # Append final pose
-    interp_traj.append(traj_list[-1])
+            interp.append((1 - t) * A + t * B)
+    interp.append(traj_list[-1])
 
-    return interp_traj
+    return interp
+
 
 class PointCloudCleaner:
     """
