@@ -1,0 +1,9 @@
+transformers==4.50.0
+diffusers==0.33.1
+open3d==0.19.0
+# open3d is optional, see pointcloud_nodes.py
+# Python version: 3.12.x (used by embedded python)
+# All versions pinned to match embedded environment
+# If using a different Python, adjust versions accordingly
+# For full reproducibility, consider using a virtual environment
+# and pip freeze > requirements.txt
