@@ -19,7 +19,14 @@ This repository contains custom nodes for ComfyUI, designed to handle various pr
    git clone https://github.com/your-repo/camera-comfyUI.git custom_nodes/camera-comfyUI
    ```
 
-2. **Install Python dependencies**
+2. **Install system dependencies (Linux/Ubuntu only)**
+   
+   If you are on Ubuntu, you may need to install some system packages for full functionality:
+   ```bash
+   sudo apt-get update && sudo apt-get install build-essential ffmpeg libsm6 libxext6 -y
+   ```
+
+3. **Install Python dependencies**
    
    Make sure you are using Python 3.12.x (the version used by ComfyUI). Then install the required packages:
    ```bash
@@ -27,14 +34,14 @@ This repository contains custom nodes for ComfyUI, designed to handle various pr
    ```
    - `open3d` is optional and only needed for point cloud visualization.
 
-3. **Install additional required nodes**
+4. **Install additional required nodes**
    
    Some workflows require extra custom nodes for full functionality:
    - [ComfyUI-Flux-Inpainting](https://github.com/rubi-du/ComfyUI-Flux-Inpainting) (required for flux-based inpainting)
    - [ComfyUI-Image-Filters](https://github.com/spacepxl/ComfyUI-Image-Filters) (for image processing and morphology operations)
    - [Other custom nodes as needed for your workflow]
 
-4. **Flux-based inpainting setup**
+5. **Flux-based inpainting setup**
    
    Outpainting/inpainting nodes use Flux Inpainting for best results. You must log in to HuggingFace to access the required models:
    ```bash
@@ -43,11 +50,11 @@ This repository contains custom nodes for ComfyUI, designed to handle various pr
    ```
    Enter your HuggingFace token when prompted.
 
-5. **Restart ComfyUI**
+6. **Restart ComfyUI**
    
    After installation, restart ComfyUI to load the new nodes.
 
-6. **Example workflows**
+7. **Example workflows**
    
    Example workflows are provided in the `workflows/` folder. See the README for details.
 
