@@ -522,8 +522,10 @@ class ReprojectDepth:
         # sampled shape: [C, H_out, W_out] or [H_out, W_out] if single channel
         reprojected_depth = sampled
         reprojected_mask  = (sampled_mask > 0.5).float()
-        #print(f"Reprojected depth shape: {reprojected_depth.shape}")
-        #print(f"Reprojected mask shape: {reprojected_mask.shape}")
+        # if fisheye, add circular mask
+        if output_projection == "FISHEYE":
+            mask_circle = (grid_x**2 + grid_y**2) <= 1.0
+            reprojected_mask = reprojected_mask * mask_circle.unsqueeze(0).unsqueeze(0)
         return reprojected_depth.permute(0,2,3,1), reprojected_mask
 
 

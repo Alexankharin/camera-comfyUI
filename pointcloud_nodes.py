@@ -303,8 +303,8 @@ class ProjectPointCloud:
                 "pointcloud":          ("TENSOR",),
                 "output_projection":   (Projection.PROJECTIONS, {}),
                 "output_horizontal_fov": ("FLOAT", {"default": 90.0}),
-                "output_width":        ("INT",   {"default": 512, "min": 1}),
-                "output_height":       ("INT",   {"default": 512, "min": 1}),
+                "output_width":        ("INT",   {"default": 512, "min": 1, "max": 16384}),
+                "output_height":       ("INT",   {"default": 512, "min": 1, "max": 16384}),
                 "point_size":          ("INT",   {"default": 1,   "min": 1}),
                 "return_inverse_depth": ("BOOLEAN", {"default": False, "tooltip": "Return inverse depth instead of regular depth"}),
             }
@@ -475,91 +475,17 @@ class PointCloudUnion:
         """
         return (torch.cat([pointcloud1, pointcloud2], dim=0),)
 
-class DepthRenormalizer:
-    """
-    Renormalize a depth tensor to match guidance depth at non-masked regions,
-    optionally in inverse-depth space.
-    """
-
-    @classmethod
-    def INPUT_TYPES(cls) -> Dict[str, Any]:
-        return {
-            "required": {
-                "depth": ("TENSOR",),
-                "guidance_depth": ("TENSOR",),
-                "guidance_mask": ("MASK",),
-                "use_inverse": ("BOOLEAN", {"default": False, "tooltip": "Renormalize in inverse-depth (1/d) space"}),
-            }
-        }
-
-    RETURN_TYPES = ("TENSOR",)
-    RETURN_NAMES = ("depth tensor",)
-    FUNCTION = "renormalize_depth"
-    CATEGORY = "Camera/depth"
-
-    def renormalize_depth(
-        self,
-        depth: torch.Tensor,
-        guidance_depth: torch.Tensor,
-        guidance_mask: torch.Tensor,
-        use_inverse: bool = False
-    ) -> Tuple[torch.Tensor]:
-        def to_hw(t: torch.Tensor) -> torch.Tensor:
-            if t.dim() == 4 and t.shape[0] == 1:
-                t = t.squeeze(0)
-            if t.dim() == 3 and t.shape[-1] == 1:
-                t = t.squeeze(-1)
-            if t.dim() == 3 and t.shape[0] in (1,3):
-                t = t.permute(1,2,0)
-            if t.dim() == 3 and t.shape[2] > 1:
-                t = t.mean(dim=2)
-            return t.float()
-
-        # extract HxW arrays
-        d  = to_hw(depth)
-        gd = to_hw(guidance_depth)
-        m  = to_hw(guidance_mask)
-        H,W= d.shape
-        mask = m > 0.5
-        mask= mask.view(H,W)
-        # optionally work in inverse-depth
-        eps = 1e-6
-        if use_inverse:
-            d_work  = 1.0 / d.clamp(min=eps)
-            gd_work = 1.0 / gd.clamp(min=eps)
-        else:
-            d_work, gd_work = d, gd
-
-        # select masked pixels
-        gd_vals = gd_work[mask]
-        d_vals  = d_work[mask]
-        if d_vals.numel() == 0:
-            return (depth,)
-
-        # compute L1-based scale & offset
-        scale  = (gd_vals.std(unbiased=False) + eps) / (d_vals.std(unbiased=False) + eps)
-        offset = gd_vals.mean() - d_vals.mean() * scale
-
-        # apply and invert if needed
-        if use_inverse:
-            inv_renorm = (1.0 / depth.clamp(min=eps)) * scale + offset
-            renorm = 1.0 / inv_renorm.clamp(min=eps)
-        else:
-            renorm = depth * scale + offset
-
-        return (renorm,)
-
 
 class LoadPointCloud:
     """
-    Load a PLY point‐cloud file from your ComfyUI input directory into a (N,7) tensor.
+    Load a PLY or NumPy .npy point‐cloud file from your ComfyUI input directory into a (N,7) tensor.
     """
     @classmethod
     def INPUT_TYPES(cls):
         input_dir = folder_paths.get_input_directory()
         files = [
             f for f in os.listdir(input_dir)
-            if os.path.isfile(os.path.join(input_dir, f)) and f.lower().endswith(".ply")
+            if os.path.isfile(os.path.join(input_dir, f)) and (f.lower().endswith(".ply") or f.lower().endswith(".npy"))
         ]
         return {
             "required": {
@@ -567,7 +493,7 @@ class LoadPointCloud:
                     sorted(files),
                     {
                         "file_chooser": True,
-                        "tooltip": "Select a .ply point‐cloud file to load from your input folder."
+                        "tooltip": "Select a .ply or .npy point‐cloud file to load from your input folder."
                     }
                 ),
             }
@@ -577,20 +503,20 @@ class LoadPointCloud:
     RETURN_TYPES = ("TENSOR",)
     RETURN_NAMES = ("loaded pointcloud",)
     FUNCTION = "load_pointcloud"
-    DESCRIPTION = "Loads a .ply point‐cloud file into a tensor of shape (N,7)."
+    DESCRIPTION = "Loads a .ply or .npy point‐cloud file into a tensor of shape (N,7)."
 
     def load_pointcloud(self, pointcloud_file: str):
-        # Resolve annotated (possibly versioned) filepath
         file_path = folder_paths.get_annotated_filepath(pointcloud_file)
-
+        if pointcloud_file.lower().endswith(".npy"):
+            arr = np.load(file_path)
+            tensor_pc = torch.from_numpy(arr)
+            return (tensor_pc,)
         coords = []
         colors = []
         with open(file_path, 'r') as f:
-            # Skip header
             line = f.readline().strip()
             while not line.startswith("end_header"):
                 line = f.readline().strip()
-            # Now parse all vertex lines
             for line in f:
                 parts = line.strip().split()
                 if len(parts) < 7:
@@ -599,14 +525,10 @@ class LoadPointCloud:
                 r, g, b, a = map(int, parts[3:7])
                 coords.append((x, y, z))
                 colors.append((r, g, b, a))
-
-        # Build a (N,7) numpy array then convert to torch.Tensor
         np_coords  = np.array(coords,  dtype=np.float32)
-        np_colors  = np.array(colors,  dtype=np.float32)/255.0  # [0,1] range
-        # alpha 
+        np_colors  = np.array(colors,  dtype=np.float32)/255.0
         combined   = np.concatenate([np_coords, np_colors], axis=1)
         tensor_pc  = torch.from_numpy(combined)
-
         return (tensor_pc,)
 
     @classmethod
@@ -625,7 +547,7 @@ class LoadPointCloud:
 
 class SavePointCloud:
     """
-    Save a point cloud tensor (N,7) to a file in PLY format,
+    Save a point cloud tensor (N,7) to a file in PLY format or as a NumPy .npy array,
     resolving into your ComfyUI output directory with a filename prefix.
     """
     def __init__(self):
@@ -643,9 +565,10 @@ class SavePointCloud:
                     "STRING",
                     {
                         "default": "ComfyUIPointCloud",
-                        "tooltip": "Prefix for the .ply file. You can include format-tokens like %date:yyyy-MM-dd%."
+                        "tooltip": "Prefix for the .ply/.npy file. You can include format-tokens like %date:yyyy-MM-dd%."
                     }
                 ),
+                "save_as": (["ply", "npy"], {"default": "ply", "tooltip": "Choose file format to save: PLY or NumPy .npy"}),
             },
             "hidden": {}
         }
@@ -654,59 +577,51 @@ class SavePointCloud:
     FUNCTION     = "save_pointcloud"
     OUTPUT_NODE  = True
     CATEGORY     = "Camera/pointcloud"
-    DESCRIPTION  = "Saves the input point cloud to your ComfyUI output directory."
+    DESCRIPTION  = "Saves the input point cloud to your ComfyUI output directory as .ply or .npy."
 
-    def save_pointcloud(self, pointcloud: torch.Tensor, filename_prefix: str):
+    def save_pointcloud(self, pointcloud: torch.Tensor, filename_prefix: str, save_as: str = "ply"):
         # apply any suffix from the node UI
         filename_prefix += self.prefix_append
 
         # ---- exactly the same pattern as SaveImage uses ----
-        # (we're abusing the image helper to get a folder, filename & counter)
         full_output_folder, filename, counter, subfolder, filename_prefix = \
             folder_paths.get_save_image_path(
                 filename_prefix,
                 self.output_dir,
-                # width/height are unused for .ply so just zero them
                 0, 0
             )
-
-        # ensure the folder exists
         os.makedirs(full_output_folder, exist_ok=True)
-
-        # build the final .ply filename
-        # note: SaveImage uses "%batch_num%" in filename, but for PC we just do one file
         base_name = filename.replace("%batch_num%", "0")
-        ply_name  = f"{base_name}_{counter:05}.ply"
-        ply_path  = os.path.join(full_output_folder, ply_name)
-
-        # extract coords + colors
-        coords = pointcloud[:, :3].cpu().numpy()
-        colors = pointcloud[:, 3:].cpu().numpy().clip(0,1)
-
-        # write header + data
-        with open(ply_path, 'w') as f:
-            f.write("ply\n")
-            f.write("format ascii 1.0\n")
-            f.write(f"element vertex {coords.shape[0]}\n")
-            f.write("property float x\n")
-            f.write("property float y\n")
-            f.write("property float z\n")
-            f.write("property uchar red\n")
-            f.write("property uchar green\n")
-            f.write("property uchar blue\n")
-            f.write("property uchar alpha\n")
-            f.write("end_header\n")
-            for (x,y,z), (r,g,b,a) in zip(coords, colors):
-                f.write(f"{x} {y} {z} {int(r*255)} {int(g*255)} {int(b*255)} {int(a*255)}\n")
-
-        # update counter so next save increments
+        if save_as == "ply":
+            ply_name  = f"{base_name}_{counter:05}.ply"
+            ply_path  = os.path.join(full_output_folder, ply_name)
+            coords = pointcloud[:, :3].cpu().numpy()
+            colors = pointcloud[:, 3:].cpu().numpy().clip(0,1)
+            with open(ply_path, 'w') as f:
+                f.write("ply\n")
+                f.write("format ascii 1.0\n")
+                f.write(f"element vertex {coords.shape[0]}\n")
+                f.write("property float x\n")
+                f.write("property float y\n")
+                f.write("property float z\n")
+                f.write("property uchar red\n")
+                f.write("property uchar green\n")
+                f.write("property uchar blue\n")
+                f.write("property uchar alpha\n")
+                f.write("end_header\n")
+                for (x,y,z), (r,g,b,a) in zip(coords, colors):
+                    f.write(f"{x} {y} {z} {int(r*255)} {int(g*255)} {int(b*255)} {int(a*255)}\n")
+            file_name = ply_name
+        else:
+            npy_name = f"{base_name}_{counter:05}.npy"
+            npy_path = os.path.join(full_output_folder, npy_name)
+            np.save(npy_path, pointcloud.cpu().numpy())
+            file_name = npy_name
         counter += 1
-
-        # return for the UI panel (so you see the saved files)
         return {
             "ui": {
                 "pointclouds": [{
-                    "filename": ply_name,
+                    "filename": file_name,
                     "subfolder": subfolder,
                     "type":      self.type
                 }]
@@ -729,8 +644,8 @@ class CameraMotionNode:
             "n_points":            ("INT",    {"default":10, "min":2, "step":1}),
             "output_projection":   (Projection.PROJECTIONS, {}),
             "output_horizontal_fov": ("FLOAT", {"default":90.0}),
-            "output_width":        ("INT",    {"default":512, "min":8, "max":8192}),
-            "output_height":       ("INT",    {"default":512, "min":8, "max":8192}),
+            "output_width":        ("INT",    {"default":512, "min":8, "max":16384}),
+            "output_height":       ("INT",    {"default":512, "min":8, "max":16384}),
             "point_size":          ("INT",    {"default":1,   "min":1}),
         }}
 
@@ -822,7 +737,6 @@ class CameraInterpolationNode:
             final_matrix = torch.from_numpy(final_matrix).float()
         traj = torch.stack([initial_matrix, final_matrix], dim=0)
         return (traj,)
-
 
 
 class CameraTrajectoryNode:
@@ -1021,12 +935,141 @@ class PointCloudCleaner:
         cleaned = pointcloud[keep_mask]
         return (cleaned,)
 
+class ProjectAndClean:
+    """
+    Projects a point cloud through a 4×4 matrix, records per-pixel point indices,
+    applies morphological cleaning on the mask (defining occluded pixels to remove),
+    and returns the point cloud with those occlusions retained.
+    """
+    @classmethod
+    def INPUT_TYPES(cls) -> Dict[str, Any]:
+        # Only allow odd kernel sizes up to 99
+        odd_kernel_sizes = [i for i in range(1, 100, 2)]
+        return {
+            "required": {
+                "pointcloud":      ("TENSOR",),
+                "matrix":          ("MAT_4X4",),
+                "projection":      (Projection.PROJECTIONS, {}),
+                "fov":             ("FLOAT", {"default": 90.0, "tooltip": "Horizontal FOV in degrees"}),
+                "width":           ("INT",   {"default": 512,  "min": 1, "max": 16384}),
+                "height":          ("INT",   {"default": 512,  "min": 1, "max": 16384}),
+                "mode":            (["erode", "open"], {"default": "erode", "tooltip": "Cleaning mode"}),
+                "kernel_size":     ("INT",   {
+                    "default": 3,
+                    "min": 1,
+                    "max": 99,
+                    "step": 2,
+                    "tooltip": "Morphological kernel size (odd values only: 1,3,5,...)"
+                }),
+            }
+        }
+    RETURN_TYPES = ("TENSOR",)
+    RETURN_NAMES = ("cleaned_pointcloud",)
+    FUNCTION = "project_and_clean"
+    CATEGORY = "Camera/pointcloud"
+
+    def project_and_clean(
+        self,
+        pointcloud: torch.Tensor,
+        matrix: torch.Tensor,
+        projection: str,
+        fov: float,
+        width: int,
+        height: int,
+        mode: str,
+        kernel_size: int,
+    ) -> Tuple[torch.Tensor]:
+        import torch.nn.functional as F
+        device = pointcloud.device
+
+        # total points
+        N = pointcloud.shape[0]
+
+        # 1) Apply 4×4 transform to point coordinates
+        M = torch.tensor(matrix, device=device, dtype=torch.float32).view(4,4)
+        coords = pointcloud[:, :3]
+        homo = torch.cat([coords, torch.ones(N,1,device=device)], dim=1)
+        coords_t = (M @ homo.T).T[:, :3]
+
+        # 2) Project to normalized UV and depth based on projection type
+        X, Y, Z = coords_t.unbind(1)
+        if projection == "PINHOLE":
+            u, v, depth = XYZ_to_pinhole(X, Y, Z, fov)
+        elif projection == "FISHEYE":
+            u, v, depth = XYZ_to_fisheye(X, Y, Z, fov)
+        else:
+            u, v, depth = XYZ_to_equirect(X, Y, Z, fov)
+
+        # 3) Rasterize UV to pixel coords
+        px = (u * (width - 1) / 2) + (width - 1) / 2
+        py = (v * (height - 1) / 2) + (height - 1) / 2
+        ix = px.round().clamp(0, width - 1).long()
+        iy = py.round().clamp(0, height - 1).long()
+        pix_idx = iy * width + ix  # [N]
+
+        # 4) Z-buffer: find first-hit mask per pixel
+        total_px = width * height
+        depth_buf = torch.full((total_px,), float('inf'), device=device)
+        depth_buf.scatter_reduce_(0, pix_idx, depth, reduce='amin', include_self=True)
+        is_first = depth == depth_buf[pix_idx]
+
+        # 5) Build index buffer for first hits
+        indices = torch.arange(N, device=device)
+        idx_buf = torch.full((total_px,), -1, device=device, dtype=torch.long)
+        first_pix = pix_idx[is_first]
+        first_idx = indices[is_first]
+        idx_buf[first_pix] = first_idx
+
+        # 6) Binary mask of visible (first-hit) pixels
+        mask_flat = idx_buf >= 0
+        mask = mask_flat.view(height, width).float()
+
+        # 7) Morphological cleaning: erode or open to define removal mask
+        pad = kernel_size // 2
+        inv = 1.0 - mask
+        if mode == 'erode':
+            inv_e = F.max_pool2d(
+                inv.unsqueeze(0).unsqueeze(0),
+                kernel_size=kernel_size,
+                stride=1,
+                padding=pad
+            )
+            clean_mask = (1.0 - inv_e).squeeze() > 0.5
+        else:
+            inv_e = F.max_pool2d(
+                inv.unsqueeze(0).unsqueeze(0),
+                kernel_size=kernel_size,
+                stride=1,
+                padding=pad
+            )
+            eroded = (1.0 - inv_e).squeeze()
+            dil = F.max_pool2d(
+                eroded.unsqueeze(0).unsqueeze(0),
+                kernel_size=kernel_size,
+                stride=1,
+                padding=pad
+            )
+            clean_mask = dil.squeeze() > 0.5
+
+        # 8) Determine which point indices to remove (those that fall in cleaned-away pixels)
+        clean_flat = clean_mask.view(-1)
+        removal_mask = ~clean_flat & (idx_buf >= 0)
+        remove_idxs = torch.unique(idx_buf[removal_mask])
+
+        # 9) Keep all points except the removed occlusion holes
+        keep_mask = torch.ones(N, dtype=torch.bool, device=device)
+        keep_mask[remove_idxs] = False
+        kept_indices = keep_mask.nonzero(as_tuple=False).view(-1)
+
+        return (pointcloud[kept_indices],)
+
+
 NODE_CLASS_MAPPINGS = {
     "DepthToPointCloud": DepthToPointCloud,
     "TransformPointCloud": TransformPointCloud,
     "ProjectPointCloud": ProjectPointCloud,
+    "ProjectAndClean": ProjectAndClean,
     "PointCloudUnion": PointCloudUnion,
-    "DepthRenormalizer": DepthRenormalizer,
     "LoadPointCloud": LoadPointCloud,
     "SavePointCloud": SavePointCloud,
     "CameraTrajectoryNode": CameraTrajectoryNode,
