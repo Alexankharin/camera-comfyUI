@@ -1081,6 +1081,109 @@ class ProjectAndClean:
 
         return (pointcloud,)
 
+class SaveTrajectory:
+    """
+    Save a trajectory tensor (N,4,4) to a .npy file in the ComfyUI output directory.
+    """
+    def __init__(self):
+        self.output_dir = folder_paths.get_output_directory()
+        self.type = "trajectory"
+        self.prefix_append = ""
+
+    @classmethod
+    def INPUT_TYPES(cls) -> Dict[str, Any]:
+        return {
+            "required": {
+                "trajectory": ("TENSOR",),
+                "filename_prefix": (
+                    "STRING",
+                    {
+                        "default": "ComfyUITrajectory",
+                        "tooltip": "Prefix for the .npy file. You can include format-tokens like %date:yyyy-MM-dd%."
+                    }
+                ),
+            },
+            "hidden": {}
+        }
+
+    RETURN_TYPES = ()
+    FUNCTION = "save_trajectory"
+    OUTPUT_NODE = True
+    CATEGORY = "Camera/pointcloud"
+    DESCRIPTION = "Saves the input trajectory tensor (N,4,4) to your ComfyUI output directory as .npy."
+
+    def save_trajectory(self, trajectory: torch.Tensor, filename_prefix: str):
+        filename_prefix += self.prefix_append
+        full_output_folder, filename, counter, subfolder, filename_prefix = \
+            folder_paths.get_save_image_path(
+                filename_prefix,
+                self.output_dir,
+                0, 0
+            )
+        os.makedirs(full_output_folder, exist_ok=True)
+        base_name = filename.replace("%batch_num%", "0")
+        npy_name = f"{base_name}_{counter:05}.npy"
+        npy_path = os.path.join(full_output_folder, npy_name)
+        np.save(npy_path, trajectory.cpu().numpy())
+        counter += 1
+        return {
+            "ui": {
+                "trajectories": [{
+                    "filename": npy_name,
+                    "subfolder": subfolder,
+                    "type": self.type
+                }]
+            }
+        }
+
+class LoadTrajectory:
+    """
+    Load a trajectory tensor (N,4,4) from a .npy file in the ComfyUI input directory.
+    """
+    @classmethod
+    def INPUT_TYPES(cls):
+        input_dir = folder_paths.get_input_directory()
+        files = [
+            f for f in os.listdir(input_dir)
+            if os.path.isfile(os.path.join(input_dir, f)) and f.lower().endswith(".npy")
+        ]
+        return {
+            "required": {
+                "trajectory_file": (
+                    sorted(files),
+                    {
+                        "file_chooser": True,
+                        "tooltip": "Select a .npy trajectory file to load from your input folder."
+                    }
+                ),
+            }
+        }
+
+    CATEGORY = "Camera/pointcloud"
+    RETURN_TYPES = ("TENSOR",)
+    RETURN_NAMES = ("loaded_trajectory",)
+    FUNCTION = "load_trajectory"
+    DESCRIPTION = "Loads a .npy trajectory file into a tensor of shape (N,4,4)."
+
+    def load_trajectory(self, trajectory_file: str):
+        file_path = folder_paths.get_annotated_filepath(trajectory_file)
+        arr = np.load(file_path)
+        tensor_traj = torch.from_numpy(arr).float()
+        return (tensor_traj,)
+
+    @classmethod
+    def IS_CHANGED(cls, trajectory_file: str):
+        path = folder_paths.get_annotated_filepath(trajectory_file)
+        m = hashlib.sha256()
+        with open(path, 'rb') as f:
+            m.update(f.read())
+        return m.digest().hex()
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, trajectory_file: str):
+        if not folder_paths.exists_annotated_filepath(trajectory_file):
+            return f"Invalid trajectory file: {trajectory_file}"
+        return True
 
 NODE_CLASS_MAPPINGS = {
     "DepthToPointCloud": DepthToPointCloud,
@@ -1094,4 +1197,6 @@ NODE_CLASS_MAPPINGS = {
     "CameraMotionNode": CameraMotionNode,
     "CameraInterpolationNode": CameraInterpolationNode,
     "PointCloudCleaner": PointCloudCleaner,
+    "SaveTrajectory": SaveTrajectory,
+    "LoadTrajectory": LoadTrajectory,
 }
