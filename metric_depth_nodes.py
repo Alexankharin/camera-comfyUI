@@ -255,34 +255,37 @@ class CombineDepthsNode:
 
         # --- SOFTMERGE via separable Gaussian blur of masks ---
         else:
+    # --- SOFTMERGE via 2D Gaussian blur of binary masks ---
+            M0 = (m0b.unsqueeze(1)>0.5)*1.0   # [B,1,H,W]
+            M1 = (m1b.unsqueeze(1)>0.5)*1.0   # [B,1,H,W]
+
             # build 1D Gaussian kernel
-            k = 2*softmerge_radius + 1
+            k = 2 * softmerge_radius + 1
             sigma = float(softmerge_radius)
             coords = torch.arange(k, device=device, dtype=torch.float32) - softmerge_radius
-            g1 = torch.exp(-0.5*(coords/sigma)**2)
-            g1 /= g1.sum()
-            # reshape for conv2d
-            kh = g1.view(1,1,1,k)
-            kv = g1.view(1,1,k,1)
+            g1 = torch.exp(-0.5 * (coords / sigma) ** 2)
+            g1 = g1 / g1.sum()
 
-            # prepare masks as [B,1,H,W]
-            M0 = m0b.unsqueeze(1)
-            M1 = m1b.unsqueeze(1)
-            # horizontal blur
-            B0 = F.conv2d(M0, kh, padding=(0, softmerge_radius))
-            B1 = F.conv2d(M1, kh, padding=(0, softmerge_radius))
-            # vertical blur
-            B0 = F.conv2d(B0, kv, padding=(softmerge_radius, 0)).squeeze(1)
-            B1 = F.conv2d(B1, kv, padding=(softmerge_radius, 0)).squeeze(1)
+            # make separable kernels
+            g1_h = g1.view(1, 1, 1, k)
+            g1_v = g1.view(1, 1, k, 1)
 
-            # normalized weights & blend
-            wsum = B0 + B1 + eps
-            w0 = B0 / wsum
-            w1 = B1 / wsum
-            out = d0*w0 + d1*w1
+            # convolve horizontally then vertically
+            B0 = F.conv2d(M0, g1_h, padding=(0, softmerge_radius))
+            B0 = F.conv2d(B0, g1_v, padding=(softmerge_radius, 0))
+            B1 = F.conv2d(M1, g1_h, padding=(0, softmerge_radius))
+            B1 = F.conv2d(B1, g1_v, padding=(softmerge_radius, 0))
 
+            # normalize so B0+B1 = 1 inside overlap, eps to avoid div by zero
+            denom = B0*M0 + B1*M1 + eps
+            w0 = (B0 / denom) * M0   # zero‐out where original mask was 0
+            w1 = (B1 / denom) * M1
+
+            # blend the two depths
+            out = (d0.unsqueeze(1) * w0 + d1.unsqueeze(1) * w1).squeeze(1)
+        #print("out.shape", out.shape)
         # --- Pack outputs ---
-        combined_depth = out.unsqueeze(-1)     # [B,H,W,1]
+        combined_depth = out.squeeze(1).unsqueeze(-1)     # [B,H,W,1]
         combined_mask  = combined_m            # [B,H,W], binary 0/1
 
         return combined_depth, combined_mask

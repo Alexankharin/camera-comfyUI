@@ -7,6 +7,7 @@ import os
 import folder_paths
 import logging
 import hashlib
+from tqdm import tqdm
 # Try importing open3d and its visualization modules; log a warning if not found
 try:
     import open3d as o3d
@@ -697,7 +698,7 @@ class CameraMotionNode:
         proj_node      = ProjectPointCloud()
         transform_node = TransformPointCloud()
         frames = []
-        for M in full_traj:
+        for M in tqdm(full_traj):
             pc_t, = transform_node.transform_pointcloud(pointcloud, M)
             img, _, _ = proj_node.project_pointcloud(
                 pc_t,
@@ -998,12 +999,13 @@ class ProjectAndClean:
         kernel_size: int,
     ) -> Tuple[torch.Tensor]:
         device = pointcloud.device
+        M = torch.tensor(matrix, device=device, dtype=torch.float32).view(4,4)
         for i in range(num_iterations):
             # total points
             N = pointcloud.shape[0]
 
             # 1) Apply 4×4 transform to point coordinates
-            M = torch.tensor(matrix, device=device, dtype=torch.float32).view(4,4)
+            
             coords = pointcloud[:, :3]
             homo = torch.cat([coords, torch.ones(N,1,device=device)], dim=1)
             coords_t = (M @ homo.T).T[:, :3]
@@ -1023,7 +1025,6 @@ class ProjectAndClean:
             ix = px.round().clamp(0, width - 1).long()
             iy = py.round().clamp(0, height - 1).long()
             pix_idx = iy * width + ix  # [N]
-
             # 4) Z-buffer: find first-hit mask per pixel
             total_px = width * height
             depth_buf = torch.full((total_px,), float('inf'), device=device)

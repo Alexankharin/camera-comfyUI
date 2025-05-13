@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import numpy as np
 from typing import Dict, Tuple, Any
 from PIL import Image
+from tqdm import tqdm
 
 # reuse existing nodes
 from .reprojection_nodes import ReprojectImage, ReprojectDepth
@@ -16,7 +17,10 @@ from .metric_depth_nodes import (
 from .pointcloud_nodes import (
     ProjectPointCloud,
     DepthToPointCloud,
-    TransformPointCloud)
+    TransformPointCloud,
+    PointCloudCleaner,
+    ProjectAndClean
+)
 from .flux_fisheye_filling_nodes import OutpaintAnyProjection
 
 # HuggingFace models
@@ -85,7 +89,7 @@ class FisheyeDepthEstimator:
 
         # 1) Full fisheye depth + ray-depth + mask
         depth_full, = de_node.estimate_depth(image, model_name, depth_scale)
-        ray_full,   = z2r_node.depth_to_ray_depth(depth_full, 90)
+        ray_full,   = z2r_node.depth_to_ray_depth(depth_full, 110)
         mask_full   = (depth_full.squeeze(-1) > 0).float()
 
         # 2) Pinhole orientations
@@ -132,7 +136,7 @@ class FisheyeDepthEstimator:
 
             # depth estimation + ray-depth
             depth_pin, = de_node.estimate_depth(img_pin, model_name, depth_scale)
-            print("depth_pin", depth_pin.shape, depth_pin.min(), depth_pin.max(), depth_pin.mean(), depth_pin.std())
+            # print("depth_pin", depth_pin.shape, depth_pin.min(), depth_pin.max(), depth_pin.mean(), depth_pin.std())
             ray_pin,   = z2r_node.depth_to_ray_depth(depth_pin, pinhole_fov)
 
             # pinhole → fisheye
@@ -146,12 +150,15 @@ class FisheyeDepthEstimator:
                 output_height        = fish_h,
                 transform_matrix     = M_inv,
             )
-            print("fish_depth", fish_depth.shape, fish_depth.min(), fish_depth.max(), fish_depth.mean(), fish_depth.std())
+            #print("fish_depth", fish_depth.shape, fish_depth.min(), fish_depth.max(), fish_depth.mean(), fish_depth.std())
             fisheye_depths.append(fish_depth)
             fisheye_masks.append(fish_mask)
         # add full fisheye depth
         fisheye_depths.append(depth_full)
-        fisheye_masks.append(mask_full)
+        # get merged fish mask
+        merged_mask=torch.sum(torch.stack(fisheye_masks), dim=0)>0.5
+        last_mask=mask_full*1.0-merged_mask*1.0
+        fisheye_masks.append(last_mask)
         # 4) Merge all maps
         d_acc = fisheye_depths[0]
         m_acc = fisheye_masks[0]
@@ -212,6 +219,14 @@ class PointcloudTrajectoryEnricher:
                 "num_inference_steps": ("INT",   {"default":50}),
                 "guidance_scale":      ("FLOAT", {"default":7.5}),
                 "mask_blur":           ("INT",   {"default":5}),
+                # ProjectAndClean params
+                "clean_projection":    (("PINHOLE","FISHEYE","EQUIRECTANGULAR"), {"default": "PINHOLE"}),
+                "clean_fov":           ("FLOAT", {"default":90.0}),
+                "clean_width":         ("INT",   {"default":512}),
+                "clean_height":        ("INT",   {"default":512}),
+                "clean_mode":          (["erode", "open"], {"default": "erode"}),
+                "clean_num_iterations":("INT",   {"default":1}),
+                "clean_kernel_size":   ("INT",   {"default":3}),
             }
         }
     RETURN_TYPES = ("TENSOR","IMAGE")
@@ -236,6 +251,13 @@ class PointcloudTrajectoryEnricher:
         num_inference_steps: int,
         guidance_scale: float,
         mask_blur: int,
+        clean_projection: str,
+        clean_fov: float,
+        clean_width: int,
+        clean_height: int,
+        clean_mode: str,
+        clean_num_iterations: int,
+        clean_kernel_size: int,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         device = pointcloud.device
 
@@ -245,18 +267,67 @@ class PointcloudTrajectoryEnricher:
         renorm_node    = DepthRenormalizer()
         depth2pc_node  = DepthToPointCloud()
         transform_node = TransformPointCloud()
+        clean_node     = PointCloudCleaner()
+        projclean_node = ProjectAndClean()
 
+        # clean pointcloud
+        pointcloud, = clean_node.clean_pointcloud(
+            pointcloud,
+            0.07, 3
+        )
+        # pointcloud_back=pointcloud[pointcloud[:,2] < 0].clone()
+        for matrix in trajectory:
+            rotated,=transform_node.transform_pointcloud(
+                pointcloud,
+                matrix.numpy()
+            )
+            rotated_back=rotated[rotated[:,2] <= 0].clone()
+            pointcloud,=projclean_node.project_and_clean(
+                rotated[rotated[:,2] > 0],
+                np.eye(4),
+                clean_projection,
+                clean_fov,
+                clean_width,
+                clean_height,
+                clean_mode,
+                clean_num_iterations,
+                clean_kernel_size
+            )
+            cleaned=torch.cat([pointcloud,rotated_back],dim=0)
+            inv_m=torch.inverse(matrix).numpy()
+            pointcloud,=transform_node.transform_pointcloud(
+                cleaned,
+                inv_m
+            )
+        # pointcloud = torch.cat([pointcloud, pointcloud_back], dim=0)
         enriched_pc = pointcloud.clone()
         debug_img = None
 
-        for M in trajectory:
+        for M in tqdm(trajectory):
+            # 0) Clean pointcloud with voxel grid before projection
             # 1) transform into camera space and filter points with Z<=0
             pc_cam, = transform_node.transform_pointcloud(enriched_pc, M.numpy())
             pc_cam = pc_cam[pc_cam[:,2] > 0]
 
+            pc_cam, = clean_node.clean_pointcloud(
+                pc_cam, 0.07, 3
+            )
+            # 1.5) ProjectAndClean step before outpainting
+            pc_cam_cleaned, = projclean_node.project_and_clean(
+                pc_cam,
+                np.eye(4),
+                clean_projection,
+                clean_fov,
+                clean_width,
+                clean_height,
+                clean_mode,
+                clean_num_iterations,
+                clean_kernel_size
+            )
+
             # 2) project to image, mask, and depth
             img, mask, depth_map = proj_node.project_pointcloud(
-                pc_cam,
+                pc_cam_cleaned,
                 camera_type,
                 horizontal_fov,
                 width,

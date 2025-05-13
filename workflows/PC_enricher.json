@@ -1,0 +1,529 @@
+{
+  "id": "312a3a27-6189-4cd7-8c9f-5a62881c623e",
+  "revision": 0,
+  "last_node_id": 18,
+  "last_link_id": 37,
+  "nodes": [
+    {
+      "id": 13,
+      "type": "LoadImage",
+      "pos": [
+        1542.239013671875,
+        1377.64697265625
+      ],
+      "size": [
+        274.080078125,
+        314
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            23,
+            24
+          ]
+        },
+        {
+          "name": "MASK",
+          "type": "MASK",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "LoadImage"
+      },
+      "widgets_values": [
+        "Fisheye_outpainted_flux_dev.png",
+        "image"
+      ]
+    },
+    {
+      "id": 4,
+      "type": "SavePointCloud",
+      "pos": [
+        3078.6005859375,
+        1605.8380126953125
+      ],
+      "size": [
+        315,
+        82
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "pointcloud",
+          "type": "TENSOR",
+          "link": 22
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "Node name for S&R": "SavePointCloud"
+      },
+      "widgets_values": [
+        "enriched_kitchen",
+        "npy"
+      ]
+    },
+    {
+      "id": 12,
+      "type": "SaveWEBM",
+      "pos": [
+        3050.188232421875,
+        1815.1011962890625
+      ],
+      "size": [
+        315,
+        437
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 32
+        }
+      ],
+      "outputs": [],
+      "properties": {},
+      "widgets_values": [
+        "ComfyUI",
+        "vp9",
+        24,
+        32
+      ]
+    },
+    {
+      "id": 17,
+      "type": "DepthToImageNode",
+      "pos": [
+        2299.68359375,
+        1336.0771484375
+      ],
+      "size": [
+        270,
+        58
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "depth",
+          "type": "TENSOR",
+          "link": 33
+        }
+      ],
+      "outputs": [
+        {
+          "name": "depth image",
+          "type": "IMAGE",
+          "links": [
+            34
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "DepthToImageNode"
+      },
+      "widgets_values": [
+        false
+      ]
+    },
+    {
+      "id": 16,
+      "type": "PreviewImage",
+      "pos": [
+        2639.304443359375,
+        1182.49755859375
+      ],
+      "size": [
+        195.35386657714844,
+        246
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 34
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "Node name for S&R": "PreviewImage"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 14,
+      "type": "FisheyeDepthEstimator",
+      "pos": [
+        1879.5245361328125,
+        1433.86181640625
+      ],
+      "size": [
+        270,
+        198
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 23
+        }
+      ],
+      "outputs": [
+        {
+          "name": "depthmap",
+          "type": "TENSOR",
+          "links": [
+            26,
+            33
+          ]
+        },
+        {
+          "name": "mask",
+          "type": "MASK",
+          "links": [
+            25
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "FisheyeDepthEstimator"
+      },
+      "widgets_values": [
+        "Depth-Anything-V2-Metric-Indoor-Base-hf",
+        1,
+        90,
+        1024,
+        4096,
+        21
+      ]
+    },
+    {
+      "id": 15,
+      "type": "DepthToPointCloud",
+      "pos": [
+        2212.486572265625,
+        1518.183349609375
+      ],
+      "size": [
+        271.408203125,
+        170
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 24
+        },
+        {
+          "name": "depthmap",
+          "shape": 7,
+          "type": "TENSOR",
+          "link": 26
+        },
+        {
+          "name": "mask",
+          "shape": 7,
+          "type": "MASK",
+          "link": 25
+        }
+      ],
+      "outputs": [
+        {
+          "name": "pointcloud",
+          "type": "TENSOR",
+          "links": [
+            35
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "DepthToPointCloud"
+      },
+      "widgets_values": [
+        "FISHEYE",
+        180,
+        1,
+        false
+      ]
+    },
+    {
+      "id": 3,
+      "type": "PointcloudTrajectoryEnricher",
+      "pos": [
+        2637.239990234375,
+        1539.796630859375
+      ],
+      "size": [
+        380.4000244140625,
+        534
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "pointcloud",
+          "type": "TENSOR",
+          "link": 35
+        },
+        {
+          "name": "trajectory",
+          "type": "TENSOR",
+          "link": 37
+        }
+      ],
+      "outputs": [
+        {
+          "name": "enriched_pointcloud",
+          "type": "TENSOR",
+          "links": [
+            22,
+            30
+          ]
+        },
+        {
+          "name": "debug_image",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "PointcloudTrajectoryEnricher"
+      },
+      "widgets_values": [
+        "PINHOLE",
+        90,
+        1024,
+        1024,
+        "PINHOLE",
+        90,
+        1024,
+        0,
+        0,
+        "",
+        10,
+        7.5,
+        5,
+        "PINHOLE",
+        90,
+        1024,
+        1024,
+        "open",
+        9,
+        15
+      ]
+    },
+    {
+      "id": 18,
+      "type": "LoadTrajectory",
+      "pos": [
+        1984.2667236328125,
+        1765.307861328125
+      ],
+      "size": [
+        270,
+        58
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "loaded_trajectory",
+          "type": "TENSOR",
+          "links": [
+            36,
+            37
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "LoadTrajectory"
+      },
+      "widgets_values": [
+        "ComfyUITrajectory_00001.npy"
+      ]
+    },
+    {
+      "id": 11,
+      "type": "CameraMotionNode",
+      "pos": [
+        2303.51123046875,
+        1776.69482421875
+      ],
+      "size": [
+        315,
+        198
+      ],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "pointcloud",
+          "type": "TENSOR",
+          "link": 30
+        },
+        {
+          "name": "trajectory",
+          "type": "TENSOR",
+          "link": 36
+        }
+      ],
+      "outputs": [
+        {
+          "name": "motion_frames",
+          "type": "IMAGE",
+          "links": [
+            32
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "CameraMotionNode"
+      },
+      "widgets_values": [
+        20,
+        "PINHOLE",
+        90,
+        1024,
+        1024,
+        2
+      ]
+    }
+  ],
+  "links": [
+    [
+      22,
+      3,
+      0,
+      4,
+      0,
+      "TENSOR"
+    ],
+    [
+      23,
+      13,
+      0,
+      14,
+      0,
+      "IMAGE"
+    ],
+    [
+      24,
+      13,
+      0,
+      15,
+      0,
+      "IMAGE"
+    ],
+    [
+      25,
+      14,
+      1,
+      15,
+      2,
+      "MASK"
+    ],
+    [
+      26,
+      14,
+      0,
+      15,
+      1,
+      "TENSOR"
+    ],
+    [
+      30,
+      3,
+      0,
+      11,
+      0,
+      "TENSOR"
+    ],
+    [
+      32,
+      11,
+      0,
+      12,
+      0,
+      "IMAGE"
+    ],
+    [
+      33,
+      14,
+      0,
+      17,
+      0,
+      "TENSOR"
+    ],
+    [
+      34,
+      17,
+      0,
+      16,
+      0,
+      "IMAGE"
+    ],
+    [
+      35,
+      15,
+      0,
+      3,
+      0,
+      "TENSOR"
+    ],
+    [
+      36,
+      18,
+      0,
+      11,
+      1,
+      "TENSOR"
+    ],
+    [
+      37,
+      18,
+      0,
+      3,
+      1,
+      "TENSOR"
+    ]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.762776844438547,
+      "offset": [
+        -2045.3046753342583,
+        -1433.3959538925521
+      ]
+    },
+    "frontendVersion": "1.19.9"
+  },
+  "version": 0.4
+}
