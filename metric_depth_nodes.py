@@ -5,7 +5,10 @@ from transformers import pipeline
 from typing import Dict, Any, Tuple
 import math
 import torchvision
-import scipy.ndimage as ndi
+import torch.nn.functional as F
+import torch.nn as nn
+from scipy.ndimage import distance_transform_edt
+
 
 # list of available HF depth-anything models
 possible_models = [
@@ -99,7 +102,7 @@ class DepthToImageNode:
 
     ) -> Tuple[torch.Tensor]:
         # depth: [1, H, W, 1]
-        d = depth.clone().detach().squeeze(0).squeeze(-1)  # [H, W]
+        d = depth.squeeze(0).squeeze(-1)  # [H, W]
         # find non-zero min/max
         d_min = d[d > 0].min()
         d_max = d[d > 0].max()
@@ -188,18 +191,19 @@ class CombineDepthsNode:
     Combines two depth maps + binary masks using:
       • AVERAGE: mean where either mask is true
       • SRC/DST: hard overlay
-      • SOFTMERGE: smooth Gaussian-blended transition
+      • SOFTMERGE: Gaussian‐blurred transition
+      • DISTANCE_AWARE: disparity‐space, distance‐transform blending
     Outputs a float32 depth tensor [B,H,W,1] and a binary mask [B,H,W].
     """
     @classmethod
-    def INPUT_TYPES(cls):
+    def INPUT_TYPES(cls) -> Dict[str,Any]:
         return {
             "required": {
                 "depthSRC":         ("TENSOR",),
                 "maskSRC":          ("MASK",),
                 "depthDST":         ("TENSOR",),
                 "maskDST":          ("MASK",),
-                "mode":             (["SRC","DST","AVERAGE","SOFTMERGE"], {"default":"AVERAGE"}),
+                "mode":             (["SRC","DST","AVERAGE","SOFTMERGE","DISTANCE_AWARE"], {"default":"AVERAGE"}),
                 "invert_mask":      ("BOOLEAN", {"default":False}),
                 "softmerge_radius": ("INT", {"default":5, "min":1, "max":50}),
             }
@@ -220,32 +224,29 @@ class CombineDepthsNode:
         invert_mask: bool,
         softmerge_radius: int,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        import torch.nn.functional as F
-
         B, H, W, _ = depthSRC.shape
         device = depthSRC.device
         eps = 1e-6
 
-        # --- Flatten to [B,H,W] & binarize masks ---
-        d0 = depthSRC.view(B, H, W)
-        d1 = depthDST.view(B, H, W)
-        m0 = maskSRC.view(B, H, W)
-        m1 = maskDST.view(B, H, W)
+        # flatten depth & masks to [B,H,W]
+        d0 = depthSRC.view(B,H,W)
+        d1 = depthDST.view(B,H,W)
+        m0 = maskSRC.view(B,H,W)
+        m1 = maskDST.view(B,H,W)
         if invert_mask:
             m0 = 1.0 - m0
             m1 = 1.0 - m1
-
         m0b = (m0 > 0.5).float()
         m1b = (m1 > 0.5).float()
-        combined_m = ((m0b + m1b) > 0).float()  # final binary mask
+        combined_m = ((m0b + m1b) > 0).float()
 
-        # --- AVERAGE ---
+        # AVERAGE
         if mode == "AVERAGE":
             out = (d0*m0b + d1*m1b) / (m0b + m1b + eps)
 
-        # --- SRC / DST (hard overlay) ---
+        # SRC/DST hard overlay
         elif mode in ("SRC","DST"):
-            avg = 0.5 * (d0 + d1)
+            avg = 0.5*(d0 + d1)
             base = m0b*d0 + m1b*d1 + (1 - m0b - m1b).clamp(min=0)*avg
             overlap = m0b * m1b
             if mode == "SRC":
@@ -253,42 +254,72 @@ class CombineDepthsNode:
             else:
                 out = overlap*d1 + (1 - overlap)*base
 
-        # --- SOFTMERGE via separable Gaussian blur of masks ---
-        else:
-    # --- SOFTMERGE via 2D Gaussian blur of binary masks ---
-            M0 = (m0b.unsqueeze(1)>0.5)*1.0   # [B,1,H,W]
-            M1 = (m1b.unsqueeze(1)>0.5)*1.0   # [B,1,H,W]
-
-            # build 1D Gaussian kernel
-            k = 2 * softmerge_radius + 1
+        # SOFTMERGE (Gaussian mask blend)
+        elif mode == "SOFTMERGE":
+            M0 = m0b.unsqueeze(1)
+            M1 = m1b.unsqueeze(1)
+            k = 2*softmerge_radius + 1
             sigma = float(softmerge_radius)
             coords = torch.arange(k, device=device, dtype=torch.float32) - softmerge_radius
-            g1 = torch.exp(-0.5 * (coords / sigma) ** 2)
-            g1 = g1 / g1.sum()
+            g1 = torch.exp(-0.5*(coords/sigma)**2)
+            g1 /= g1.sum()
+            g_h = g1.view(1,1,1,k)
+            g_v = g1.view(1,1,k,1)
+            # separable blur
+            B0 = F.conv2d(F.conv2d(M0, g_h, padding=(0,softmerge_radius)), g_v, padding=(softmerge_radius,0))
+            B1 = F.conv2d(F.conv2d(M1, g_h, padding=(0,softmerge_radius)), g_v, padding=(softmerge_radius,0))
+            denom = B0 + B1 + eps
+            w0 = (B0/denom) * M0
+            w1 = (B1/denom) * M1
+            out = (d0.unsqueeze(1)*w0 + d1.unsqueeze(1)*w1).squeeze(1)
 
-            # make separable kernels
-            g1_h = g1.view(1, 1, 1, k)
-            g1_v = g1.view(1, 1, k, 1)
+        # DISTANCE_AWARE (disparity + distance-transform)
+        else:  # mode == "DISTANCE_AWARE"
+            # compute binary masks
+            m0_bin = m0b.cpu().numpy().astype(np.uint8)
+            m1_bin = m1b.cpu().numpy().astype(np.uint8)
 
-            # convolve horizontally then vertically
-            B0 = F.conv2d(M0, g1_h, padding=(0, softmerge_radius))
-            B0 = F.conv2d(B0, g1_v, padding=(softmerge_radius, 0))
-            B1 = F.conv2d(M1, g1_h, padding=(0, softmerge_radius))
-            B1 = F.conv2d(B1, g1_v, padding=(softmerge_radius, 0))
+            # disparity (inverse depth)
+            #disp0 = 1.0/(d0 + eps)
+            #disp1 = 1.0/(d1 + eps)
 
-            # normalize so B0+B1 = 1 inside overlap, eps to avoid div by zero
-            denom = B0*M0 + B1*M1 + eps
-            w0 = (B0 / denom) * M0   # zero‐out where original mask was 0
-            w1 = (B1 / denom) * M1
+            # distance transform per batch
+            D0 = torch.zeros((B,H,W), device=device)
+            D1 = torch.zeros((B,H,W), device=device)
+            for b in range(B):
+                D0_b = distance_transform_edt(m0_bin[b])
+                D1_b = distance_transform_edt(m1_bin[b])
+                D0[b] = torch.from_numpy(D0_b).to(device)
+                D1[b] = torch.from_numpy(D1_b).to(device)
 
-            # blend the two depths
-            out = (d0.unsqueeze(1) * w0 + d1.unsqueeze(1) * w1).squeeze(1)
-        #print("out.shape", out.shape)
-        # --- Pack outputs ---
-        combined_depth = out.squeeze(1).unsqueeze(-1)     # [B,H,W,1]
-        combined_mask  = combined_m            # [B,H,W], binary 0/1
+            # build weights
+            overlap = (m0b * m1b) > 0
+            w0 = torch.zeros_like(d0)
+            w1 = torch.zeros_like(d0)
 
-        return combined_depth, combined_mask
+            # in overlap region: distance-based ratio
+            denomD = D0 + D1 + eps
+            w0_o = D0 / denomD
+            w1_o = D1 / denomD
+            w0[overlap] = w0_o[overlap]
+            w1[overlap] = w1_o[overlap]
+
+            # in src-only region: full src weight
+            mask0_only = (m0b > 0) & (m1b == 0)
+            w0[mask0_only] = 1.0
+
+            # in dst-only region: full dst weight
+            mask1_only = (m1b > 0) & (m0b == 0)
+            w1[mask1_only] = 1.0
+
+            # blend in disparity space, then invert back
+            #disp_blend = w0 * disp0 + w1 * disp1
+            #out = 1.0/(disp_blend + eps)
+            d_blend= w0 * d0 + w1 * d1
+            out = d_blend
+        # pack outputs
+        combined_depth = out.unsqueeze(-1)      # [B,H,W,1]
+        return combined_depth, combined_m
 
 class DepthRenormalizer:
     """

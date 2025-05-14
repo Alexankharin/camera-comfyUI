@@ -359,7 +359,7 @@ class ProjectPointCloud:
             fg_rgb[hole]   = bg_rgb[hole]
             fg_alpha[hole] = 1.0
             flat_hole = hole.view(-1)
-            depth_front = depth_front.clone()
+            # depth_front = depth_front# .clone()
             depth_front[flat_hole] = depth_back[flat_hole]
 
         # 4) pack outputs
@@ -888,61 +888,64 @@ def launch_trajectory_editor(
 
 class PointCloudCleaner:
     """
-    Cleans up the point cloud by removing points in voxels
-    that have fewer than `min_points_per_voxel` points.
-    This is O(N) with a single unique/counts pass.
+    Projects a pointcloud through an identity matrix into fisheye-180° normalized UV and depth,
+    then inverts and normalizes depth and performs voxel-based cleaning in (px,py,inv_depth) space.
     """
     @classmethod
     def INPUT_TYPES(cls) -> Dict[str, Any]:
         return {
             "required": {
-                "pointcloud": ("TENSOR",),
-                "voxel_size": ("FLOAT", {
-                    "default": 0.05, "min": 1e-4, "max": 1.0, "step": 1e-4,
-                    "tooltip": "Edge length of the cubic voxels"
-                }),
-                "min_points_per_voxel": ("INT", {
-                    "default": 3, "min": 1, "max": 100, "step": 1,
-                    "tooltip": "Minimum number of points in a voxel to keep it"
-                }),
+                "pointcloud":             ("TENSOR",),
+                "width":                  ("INT",   {"default":1024, "min":1}),
+                "height":                 ("INT",   {"default":1024, "min":1}),
+                "voxel_size":             ("FLOAT", {"default":1.0,   "min":1e-3}),
+                "min_points_per_voxel":   ("INT",   {"default":3,     "min":1}),
             }
         }
-
     RETURN_TYPES = ("TENSOR",)
-    RETURN_NAMES = ("cleaned pointcloud",)
+    RETURN_NAMES = ("cleaned_pointcloud",)
     FUNCTION = "clean_pointcloud"
     CATEGORY = "Camera/pointcloud"
 
     def clean_pointcloud(
         self,
         pointcloud: torch.Tensor,
+        width: int,
+        height: int,
         voxel_size: float,
         min_points_per_voxel: int
     ) -> Tuple[torch.Tensor]:
-        """
-        Remove all points that fall into voxels with fewer than
-        `min_points_per_voxel` points. Very fast and memory-light.
-        """
-        # [N,4+] → [N,3]
+        device = pointcloud.device
+        N = pointcloud.shape[0]
+
+        # 1) Project through identity (camera at origin) --> just pts in camera space
         coords = pointcloud[:, :3]
-        device = coords.device
 
-        # 1) Compute integer voxel indices per point: [N,3]
-        #    floor(coords / voxel_size)
-        voxel_idx = torch.floor(coords / voxel_size).to(torch.int64)
+        # 2) Fisheye-180 projection to normalized uv and raw depth
+        X, Y, Z = coords.unbind(1)
+        u, v, depth = XYZ_to_fisheye(X, Y, Z, 180.0)
 
-        # 2) Find unique voxels, get for each point its voxel-ID:
-        #    unique_voxel_coords: [M,3], inverse_idx: [N], counts: [M]
-        unique_voxels, inverse_idx, counts = torch.unique(
+        # 3) Convert normalized uv -> pixel coordinates
+        px = (u * (width  - 1) / 2.0) + ((width  - 1) / 2.0)
+        py = (v * (height - 1) / 2.0) + ((height - 1) / 2.0)
+
+        # 4) Invert depth and normalize so that max(inv_depth) == width/2
+        inv_depth = 1.0 / (depth + 1e-6)
+        inv_max = inv_depth.max()
+        inv_min = inv_depth.min()
+        inv_norm = (inv_depth-inv_min) / (inv_max-inv_min)*(width) # 0-W/2
+
+        # 5) Build voxel indices in [px,py,inv_norm] space
+        uvz = torch.stack([px, py, inv_norm], dim=1)
+        voxel_idx = torch.floor(uvz / voxel_size).to(torch.int64)
+
+        # 6) Unique voxels & counts
+        _, inverse_idx, counts = torch.unique(
             voxel_idx, return_inverse=True, return_counts=True, dim=0
         )
 
-        # 3) Mark which voxels are “large” enough
-        good_voxel = counts >= min_points_per_voxel  # [M]
-
-        # 4) Keep only points whose voxel is good
-        keep_mask = good_voxel[inverse_idx]           # [N]
-
+        # 7) Filter points in sparse voxels
+        keep_mask = counts[inverse_idx] >= min_points_per_voxel
         cleaned = pointcloud[keep_mask]
         return (cleaned,)
 
@@ -951,34 +954,22 @@ class ProjectAndClean:
     Projects a point cloud through a 4×4 matrix, records per-pixel point indices,
     applies morphological cleaning on the mask (defining occluded pixels to remove),
     and returns the point cloud with those occlusions retained.
+    Buffers for depth and index are reused to reduce peak memory.
     """
     @classmethod
     def INPUT_TYPES(cls) -> Dict[str, Any]:
-        # Only allow odd kernel sizes up to 99
         odd_kernel_sizes = [i for i in range(1, 100, 2)]
         return {
             "required": {
                 "pointcloud":      ("TENSOR",),
                 "matrix":          ("MAT_4X4",),
                 "projection":      (Projection.PROJECTIONS, {}),
-                "fov":             ("FLOAT", {"default": 90.0, "tooltip": "Horizontal FOV in degrees"}),
-                "width":           ("INT",   {"default": 512,  "min": 1, "max": 16384}),
-                "height":          ("INT",   {"default": 512,  "min": 1, "max": 16384}),
-                "mode":            (["erode", "open"], {"default": "erode", "tooltip": "Cleaning mode"}),
-                "num_iterations": ("INT",   {
-                    "default": 1,
-                    "min": 1,
-                    "max": 10,
-                    "step": 1,
-                    "tooltip": "Number of iterations to apply the morphological operation"
-                }),
-                "kernel_size":     ("INT",   {
-                    "default": 3,
-                    "min": 1,
-                    "max": 99,
-                    "step": 2,
-                    "tooltip": "Morphological kernel size (odd values only: 1,3,5,...)"
-                }),
+                "fov":             ("FLOAT", {"default": 90.0}),
+                "width":           ("INT",   {"default": 512, "min": 1}),
+                "height":          ("INT",   {"default": 512, "min": 1}),
+                "mode":            (["erode", "open"], {"default": "erode"}),
+                "num_iterations":  ("INT",   {"default": 1, "min": 1, "max": 10}),
+                "kernel_size":     ("INT",   {"default": 3, "min": 1, "max": 99, "step": 2}),
             }
         }
     RETURN_TYPES = ("TENSOR",)
@@ -999,18 +990,27 @@ class ProjectAndClean:
         kernel_size: int,
     ) -> Tuple[torch.Tensor]:
         device = pointcloud.device
-        M = torch.tensor(matrix, device=device, dtype=torch.float32).view(4,4)
-        for i in range(num_iterations):
-            # total points
-            N = pointcloud.shape[0]
 
-            # 1) Apply 4×4 transform to point coordinates
-            
+        # Prepare transformation matrix on-device
+        if isinstance(matrix, torch.Tensor):
+            M = matrix.to(device).view(4, 4)
+        else:
+            M = torch.tensor(matrix, device=device, dtype=torch.float32).view(4, 4)
+
+        total_px = width * height
+        # Preallocate buffers
+        depth_buf = torch.empty((total_px,), device=device)
+        idx_buf   = torch.full((total_px,), -1, device=device, dtype=torch.long)
+        pad = kernel_size // 2
+
+        for _ in range(num_iterations):
+            N = pointcloud.shape[0]
+            # 1) Transform points
             coords = pointcloud[:, :3]
-            homo = torch.cat([coords, torch.ones(N,1,device=device)], dim=1)
+            homo = torch.cat([coords, torch.ones((N, 1), device=device)], dim=1)
             coords_t = (M @ homo.T).T[:, :3]
 
-            # 2) Project to normalized UV and depth based on projection type
+            # 2) Project
             X, Y, Z = coords_t.unbind(1)
             if projection == "PINHOLE":
                 u, v, depth = XYZ_to_pinhole(X, Y, Z, fov)
@@ -1019,66 +1019,45 @@ class ProjectAndClean:
             else:
                 u, v, depth = XYZ_to_equirect(X, Y, Z, fov)
 
-            # 3) Rasterize UV to pixel coords
+            # 3) Rasterize
             px = (u * (width - 1) / 2) + (width - 1) / 2
             py = (v * (height - 1) / 2) + (height - 1) / 2
             ix = px.round().clamp(0, width - 1).long()
             iy = py.round().clamp(0, height - 1).long()
             pix_idx = iy * width + ix  # [N]
-            # 4) Z-buffer: find first-hit mask per pixel
-            total_px = width * height
-            depth_buf = torch.full((total_px,), float('inf'), device=device)
+
+            # 4) Z-buffer first hit
+            depth_buf.fill_(float('inf'))
             depth_buf.scatter_reduce_(0, pix_idx, depth, reduce='amin', include_self=True)
             is_first = depth == depth_buf[pix_idx]
 
-            # 5) Build index buffer for first hits
+            # 5) Build index buffer of first hits correctly
+            idx_buf.fill_(-1)
             indices = torch.arange(N, device=device)
-            idx_buf = torch.full((total_px,), -1, device=device, dtype=torch.long)
-            first_pix = pix_idx[is_first]
-            first_idx = indices[is_first]
-            idx_buf[first_pix] = first_idx
+            first_pixels = pix_idx[is_first]
+            first_pts   = indices[is_first]
+            idx_buf[first_pixels] = first_pts
 
-            # 6) Binary mask of visible (first-hit) pixels
+            # 6) Mask and morphological clean
             mask_flat = idx_buf >= 0
             mask = mask_flat.view(height, width).float()
-
-            # 7) Morphological cleaning: erode or open to define removal mask
-            pad = kernel_size // 2
-            inv = 1.0 - mask
+            inv = (1.0 - mask).unsqueeze(0).unsqueeze(0)
             if mode == 'erode':
-                inv_e = F.max_pool2d(
-                    inv.unsqueeze(0).unsqueeze(0),
-                    kernel_size=kernel_size,
-                    stride=1,
-                    padding=pad
-                )
+                inv_e = F.max_pool2d(inv, kernel_size=kernel_size, stride=1, padding=pad)
                 clean_mask = (1.0 - inv_e).squeeze() > 0.5
             else:
-                inv_e = F.max_pool2d(
-                    inv.unsqueeze(0).unsqueeze(0),
-                    kernel_size=kernel_size,
-                    stride=1,
-                    padding=pad
-                )
-                eroded = (1.0 - inv_e).squeeze()
-                dil = F.max_pool2d(
-                    eroded.unsqueeze(0).unsqueeze(0),
-                    kernel_size=kernel_size,
-                    stride=1,
-                    padding=pad
-                )
+                inv_e = F.max_pool2d(inv, kernel_size=kernel_size, stride=1, padding=pad)
+                eroded = (1.0 - inv_e)
+                dil = F.max_pool2d(eroded, kernel_size=kernel_size, stride=1, padding=pad)
                 clean_mask = dil.squeeze() > 0.5
 
-            # 8) Determine which point indices to remove (those that fall in cleaned-away pixels)
+            # 7) Remove points in cleaned-away pixels
             clean_flat = clean_mask.view(-1)
-            removal_mask = ~clean_flat & (idx_buf >= 0)
-            remove_idxs = torch.unique(idx_buf[removal_mask])
-
-            # 9) Keep all points except the removed occlusion holes
-            keep_mask = torch.ones(N, dtype=torch.bool, device=device)
-            keep_mask[remove_idxs] = False
-            kept_indices = keep_mask.nonzero(as_tuple=False).view(-1)
-            pointcloud = pointcloud[kept_indices]
+            removal = (~clean_flat) & (idx_buf >= 0)
+            remove_idxs = torch.unique(idx_buf[removal])
+            keep = torch.ones(N, dtype=torch.bool, device=device)
+            keep[remove_idxs] = False
+            pointcloud = pointcloud[keep]
 
         return (pointcloud,)
 

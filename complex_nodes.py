@@ -38,10 +38,10 @@ class FisheyeDepthEstimator:
     Estimates a full 180° fisheye depthmap by:
       1. Estimating depth on the full fisheye image
       2. Extracting 90° pinhole views (front, left, right, up, down)
-      3. Running depth estimation + ray-depth conversion per view
+      3. Running depth estimation per view
       4. Reprojecting back to fisheye
       5. Renormalizing overlaps
-      6. Soft-merging all six maps
+      6. Merging all six maps with selectable mode
     Outputs:
       - depthmap: [B,H,W,1]
       - mask: [B,H,W], circular mask of fisheye region
@@ -50,13 +50,14 @@ class FisheyeDepthEstimator:
     def INPUT_TYPES(cls) -> Dict[str, Any]:
         return {
             "required": {
-                "image":                ("IMAGE",),
-                "model_name":           ("STRING", {"choices": possible_models, "default": possible_models[0]}),
-                "depth_scale":          ("FLOAT",  {"default":1.0,  "min":0.0, "max":1000.0, "step":0.01}),
-                "pinhole_fov":          ("FLOAT",  {"default":90.0, "min":1.0, "max":179.0}),
-                "pinhole_resolution":   ("INT",    {"default":1024, "min":64}),
-                "fisheye_resolution":   ("INT",    {"default":4096, "min":64}),
-                "softmerge_radius":     ("INT",    {"default":25,   "min":1,   "tooltip":"Gaussian radius for merging"}),
+                "image":              ("IMAGE",),
+                "model_name":         (possible_models, {"default": possible_models[0]}),
+                "depth_scale":        ("FLOAT",  {"default":1.0, "min":0.0, "max":1000.0, "step":0.01}),
+                "pinhole_fov":        ("FLOAT",  {"default":90.0, "min":1.0, "max":179.0}),
+                "pinhole_resolution": ("INT",    {"default":1024, "min":64}),
+                "fisheye_resolution": ("INT",    {"default":4096, "min":64}),
+                "mode":               (["SRC","DST","AVERAGE","SOFTMERGE","DISTANCE_AWARE"], {"default":"AVERAGE"}),
+                "softmerge_radius":   ("INT",    {"default":25,    "min":1, "tooltip":"Gaussian radius for merging"}),
             }
         }
     RETURN_TYPES = ("TENSOR","MASK")
@@ -72,9 +73,10 @@ class FisheyeDepthEstimator:
         pinhole_fov: float,
         pinhole_resolution: int,
         fisheye_resolution: int,
+        mode: str,
         softmerge_radius: int,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        # instantiate helper nodes
+        # helper nodes
         de_node   = DepthEstimatorNode()
         z2r_node  = ZDepthToRayDepthNode()
         ri_node   = ReprojectImage()
@@ -87,12 +89,11 @@ class FisheyeDepthEstimator:
         pin_w = pin_h = pinhole_resolution
         fish_w = fish_h = fisheye_resolution
 
-        # 1) Full fisheye depth + ray-depth + mask
+        # 1) Full fisheye depth + mask
         depth_full, = de_node.estimate_depth(image, model_name, depth_scale)
-        ray_full,   = z2r_node.depth_to_ray_depth(depth_full, 110)
-        mask_full   = (depth_full.squeeze(-1) > 0).float()
+        mask_full   = (depth_full > 0).float()
 
-        # 2) Pinhole orientations
+        # 2) Pinhole orientations (5 views)
         rotations = [
             (0,   0,  0),    # front
             (0,  45,  0),    # right
@@ -104,7 +105,7 @@ class FisheyeDepthEstimator:
         fisheye_depths = []
         fisheye_masks  = []
 
-        # helper: euler → 4×4 matrix
+        # euler → matrix
         def euler_to_matrix(pitch, yaw, roll):
             p, y, r = map(math.radians, (pitch, yaw, roll))
             Rx = torch.tensor([[1,0,0],[0,math.cos(p),-math.sin(p)],[0,math.sin(p),math.cos(p)]], dtype=torch.float32)
@@ -112,14 +113,14 @@ class FisheyeDepthEstimator:
             Rz = torch.tensor([[math.cos(r),-math.sin(r),0],[math.sin(r),math.cos(r),0],[0,0,1]], dtype=torch.float32)
             R = Rz @ Ry @ Rx
             M = torch.eye(4, dtype=torch.float32)
-            M[:3,:3] = R
+            M[:3, :3] = R
             return M
 
-        # 3) Process rotated views
+        # 3) Process each orientation
         for pitch, yaw, roll in rotations:
-            M    = euler_to_matrix(pitch, yaw, roll)
-            M_inv= torch.inverse(M).numpy()
-            M_np = M.numpy()
+            M     = euler_to_matrix(pitch, yaw, roll)
+            M_np  = M.numpy()
+            M_inv = torch.inverse(M).numpy()
 
             # fisheye → pinhole
             img_pin, mask_pin = ri_node.reproject_image(
@@ -134,14 +135,12 @@ class FisheyeDepthEstimator:
                 feathering           = 0,
             )
 
-            # depth estimation + ray-depth
+            # estimate pinhole depth
             depth_pin, = de_node.estimate_depth(img_pin, model_name, depth_scale)
-            # print("depth_pin", depth_pin.shape, depth_pin.min(), depth_pin.max(), depth_pin.mean(), depth_pin.std())
-            ray_pin,   = z2r_node.depth_to_ray_depth(depth_pin, pinhole_fov)
 
             # pinhole → fisheye
             fish_depth, fish_mask = rd_node.reproject_depth(
-                ray_pin,
+                depth_pin,
                 input_horizontal_fov = pinhole_fov,
                 output_horizontal_fov= fisheye_fov,
                 input_projection     = "PINHOLE",
@@ -150,50 +149,53 @@ class FisheyeDepthEstimator:
                 output_height        = fish_h,
                 transform_matrix     = M_inv,
             )
-            #print("fish_depth", fish_depth.shape, fish_depth.min(), fish_depth.max(), fish_depth.mean(), fish_depth.std())
-            fisheye_depths.append(fish_depth)
+            # squeeze mask to [B,H,W]
+            fish_mask = fish_mask.squeeze(1)
+
+            fisheye_depths.append(fish_depth) # [B,H,W]
             fisheye_masks.append(fish_mask)
-        # add full fisheye depth
-        fisheye_depths.append(depth_full)
-        # get merged fish mask
-        merged_mask=torch.sum(torch.stack(fisheye_masks), dim=0)>0.5
-        last_mask=mask_full*1.0-merged_mask*1.0
-        fisheye_masks.append(last_mask)
-        # 4) Merge all maps
+        fisheye_depths.append(depth_full) # [B,H,W]
+        fisheye_masks.append(mask_full.squeeze(-1)) # [B,H,W 1]
+        # merged mask
+        merged_mask = torch.sum(torch.stack(fisheye_masks), dim=0) > 0.5
+        # print(fisheye_depths[0].shape, fisheye_depths[-1].shape, merged_mask.shape)
+        # 4) Merge in sequence
         d_acc = fisheye_depths[0]
         m_acc = fisheye_masks[0]
-        for d_new, m_new in zip(fisheye_depths[1:], fisheye_masks[1:]):
-            # renormalize new to accumulated
-            d_norm, = ren_node.renormalize_depth(
-                d_new,
-                d_acc,
-                m_new,
-                m_acc,
-                use_inverse=False
-            )
-
-            # soft-merge
+        for d_new, m_new in zip(fisheye_depths[1:-1], fisheye_masks[1:-1]):
+            d_norm, = ren_node.renormalize_depth(d_new, d_acc, m_new, m_acc, use_inverse=False)
             d_acc, m_acc = comb_node.combine_depths(
                 d_acc,
                 m_acc,
                 d_norm,
                 m_new,
-                mode               = "SOFTMERGE",
-                invert_mask        = False,
-                softmerge_radius   = softmerge_radius
+                mode             = mode,
+                invert_mask      = False,
+                softmerge_radius = softmerge_radius
             )
+        # last depth is full fisheye -mode is SRC to prevent resolution drawbacks
+        m_new_last = fisheye_masks[-1]
+        d_new_last = fisheye_depths[-1]
+        d_norm, = ren_node.renormalize_depth(d_new_last, d_acc, m_new_last, m_acc, use_inverse=False)
+        d_acc,m_acc = comb_node.combine_depths(
+            d_acc,
+            m_acc,
+            d_norm,
+            m_new_last,
+            mode             = "SRC",
+            invert_mask      = False,
+            softmerge_radius = softmerge_radius
+        )
 
-        # 5) Generate circular mask
-        # grid of coords
-        ys = torch.arange(fish_h, device=d_acc.device).view(1,fish_h,1)
-        xs = torch.arange(fish_w, device=d_acc.device).view(1,1,fish_w)
+        # 5) Circular mask
+        ys = torch.arange(fish_h, device=d_acc.device).view(1, fish_h, 1)
+        xs = torch.arange(fish_w, device=d_acc.device).view(1, 1, fish_w)
         cy = (fish_h - 1) / 2.0
         cx = (fish_w - 1) / 2.0
-        dist2 = (ys - cy)**2 + (xs - cx)**2
+        dist2   = (ys - cy)**2 + (xs - cx)**2
         radius2 = (min(fish_w, fish_h) / 2.0)**2
-        circ_mask = (dist2 <= radius2).float()  # [1,H,W]
-        print("dacc", d_acc.shape, d_acc.min(), d_acc.max(), d_acc.mean(), d_acc.std())
-        return (d_acc, circ_mask)
+        circ_mask = (dist2 <= radius2).float()
+        return d_acc, circ_mask
 
 class PointcloudTrajectoryEnricher:
     """
@@ -203,33 +205,30 @@ class PointcloudTrajectoryEnricher:
     def INPUT_TYPES(cls) -> Dict[str, Dict[str, Any]]:
         return {
             "required": {
-                "pointcloud":     ("TENSOR",),
-                "trajectory":     ("TENSOR",),  # (K,4,4)
-                "camera_type":    (("PINHOLE","FISHEYE","EQUIRECTANGULAR"),),
-                "horizontal_fov": ("FLOAT", {"default":90.0}),
-                "width":          ("INT",   {"default":512}),
-                "height":         ("INT",   {"default":512}),
+                "pointcloud":            ("TENSOR",),
+                "trajectory":            ("TENSOR",),  # (K,4,4)
+                "camera_type":           (("PINHOLE","FISHEYE","EQUIRECTANGULAR"),),
+                "horizontal_fov":        ("FLOAT", {"default":90.0}),
+                "width":                 ("INT",   {"default":512}),
+                "height":                ("INT",   {"default":512}),
                 # outpainting params
-                "patch_projection":    (("PINHOLE","FISHEYE","EQUIRECTANGULAR"),),
-                "patch_horiz_fov":     ("FLOAT", {"default":90.0}),
-                "patch_res":           ("INT",   {"default":512}),
-                "patch_phi":           ("FLOAT", {"default":0.0}),
-                "patch_theta":         ("FLOAT", {"default":0.0}),
-                "prompt":              ("STRING",{"default":""}),
-                "num_inference_steps": ("INT",   {"default":50}),
-                "guidance_scale":      ("FLOAT", {"default":7.5}),
-                "mask_blur":           ("INT",   {"default":5}),
-                # ProjectAndClean params
-                "clean_projection":    (("PINHOLE","FISHEYE","EQUIRECTANGULAR"), {"default": "PINHOLE"}),
-                "clean_fov":           ("FLOAT", {"default":90.0}),
-                "clean_width":         ("INT",   {"default":512}),
-                "clean_height":        ("INT",   {"default":512}),
-                "clean_mode":          (["erode", "open"], {"default": "erode"}),
-                "clean_num_iterations":("INT",   {"default":1}),
-                "clean_kernel_size":   ("INT",   {"default":3}),
+                "patch_projection":      (("PINHOLE","FISHEYE","EQUIRECTANGULAR"),),
+                "patch_horiz_fov":       ("FLOAT", {"default":90.0}),
+                "patch_res":             ("INT",   {"default":512}),
+                "patch_phi":             ("FLOAT", {"default":0.0}),
+                "patch_theta":           ("FLOAT", {"default":0.0}),
+                "prompt":                ("STRING",{"default":""}),
+                "num_inference_steps":   ("INT",   {"default":50}),
+                "guidance_scale":        ("FLOAT", {"default":7.5}),
+                "mask_blur":             ("INT",   {"default":5}),
+                # cleaning params
+                "voxel_size":            ("FLOAT", {"default":0.07}),
+                "min_points_per_voxel":  ("INT",   {"default":3}),
+                # depth estimation model
+                "model_name": (possible_models, {"default": possible_models[0]}),
             }
         }
-    RETURN_TYPES = ("TENSOR","IMAGE")
+    RETURN_TYPES = ("TENSOR","IMAGE","TENSOR")
     RETURN_NAMES = ("enriched_pointcloud","debug_image")
     FUNCTION = "enrich_trajectory"
     CATEGORY = "Camera/pointcloud"
@@ -251,16 +250,13 @@ class PointcloudTrajectoryEnricher:
         num_inference_steps: int,
         guidance_scale: float,
         mask_blur: int,
-        clean_projection: str,
-        clean_fov: float,
-        clean_width: int,
-        clean_height: int,
-        clean_mode: str,
-        clean_num_iterations: int,
-        clean_kernel_size: int,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        voxel_size: float,
+        min_points_per_voxel: int,
+        model_name: str,
+    ) -> Tuple[torch.Tensor, torch.Tensor,torch.Tensor]:
         device = pointcloud.device
 
+        # reuse stateless nodes
         proj_node      = ProjectPointCloud()
         outpaint_node  = OutpaintAnyProjection()
         depth_node     = DepthEstimatorNode()
@@ -268,75 +264,50 @@ class PointcloudTrajectoryEnricher:
         depth2pc_node  = DepthToPointCloud()
         transform_node = TransformPointCloud()
         clean_node     = PointCloudCleaner()
-        projclean_node = ProjectAndClean()
 
-        # clean pointcloud
-        pointcloud, = clean_node.clean_pointcloud(
-            pointcloud,
-            0.07, 3
-        )
-        # pointcloud_back=pointcloud[pointcloud[:,2] < 0].clone()
-        for matrix in trajectory:
-            rotated,=transform_node.transform_pointcloud(
+        # initial clean on GPU
+        with torch.no_grad():
+            pointcloud, = clean_node.clean_pointcloud(
                 pointcloud,
-                matrix.numpy()
+                voxel_size=voxel_size,
+                min_points_per_voxel=min_points_per_voxel,
+                width=4096,
+                height=4096,
             )
-            rotated_back=rotated[rotated[:,2] <= 0].clone()
-            pointcloud,=projclean_node.project_and_clean(
-                rotated[rotated[:,2] > 0],
-                np.eye(4),
-                clean_projection,
-                clean_fov,
-                clean_width,
-                clean_height,
-                clean_mode,
-                clean_num_iterations,
-                clean_kernel_size
-            )
-            cleaned=torch.cat([pointcloud,rotated_back],dim=0)
-            inv_m=torch.inverse(matrix).numpy()
-            pointcloud,=transform_node.transform_pointcloud(
-                cleaned,
-                inv_m
-            )
-        # pointcloud = torch.cat([pointcloud, pointcloud_back], dim=0)
-        enriched_pc = pointcloud.clone()
+        enriched_pc = pointcloud
         debug_img = None
+        debug_depth = None
 
-        for M in tqdm(trajectory):
-            # 0) Clean pointcloud with voxel grid before projection
-            # 1) transform into camera space and filter points with Z<=0
-            pc_cam, = transform_node.transform_pointcloud(enriched_pc, M.numpy())
-            pc_cam = pc_cam[pc_cam[:,2] > 0]
+        # iterate through trajectory
+        for M in tqdm(trajectory[:10], desc="Enriching trajectory"):
+            M_np  = M.cpu().numpy()
+            M_inv = np.linalg.inv(M_np)
 
-            pc_cam, = clean_node.clean_pointcloud(
-                pc_cam, 0.07, 3
-            )
-            # 1.5) ProjectAndClean step before outpainting
-            pc_cam_cleaned, = projclean_node.project_and_clean(
-                pc_cam,
-                np.eye(4),
-                clean_projection,
-                clean_fov,
-                clean_width,
-                clean_height,
-                clean_mode,
-                clean_num_iterations,
-                clean_kernel_size
+            # transform and split
+            rotated, = transform_node.transform_pointcloud(enriched_pc, M_np)
+            pc_front = rotated[rotated[:,2] > 0]
+
+            # clean front points
+            pc_front, = clean_node.clean_pointcloud(
+                pc_front,
+                voxel_size=voxel_size,
+                min_points_per_voxel=min_points_per_voxel,
+                width=4096,
+                height=4096,
             )
 
-            # 2) project to image, mask, and depth
+            # project to image+depth
             img, mask, depth_map = proj_node.project_pointcloud(
-                pc_cam_cleaned,
+                pc_front,
                 camera_type,
                 horizontal_fov,
                 width,
                 height,
-                point_size=1,
+                point_size=3,
                 return_inverse_depth=False,
             )
 
-            # 3) outpaint: fill holes where mask==0
+            # outpaint
             hole_mask = (mask < 0.5).float()
             out_img, out_mask = outpaint_node.outpaint_any(
                 img,
@@ -361,8 +332,8 @@ class PointcloudTrajectoryEnricher:
             )
             debug_img = out_img
 
-            # 4) estimate new depth + renormalize using original mask as guidance
-            new_depth, = depth_node.estimate_depth(out_img, "Depth-Anything-V2-Metric-Indoor-Base-hf", 1.0)
+            # depth refine using selected model
+            new_depth, = depth_node.estimate_depth(out_img, model_name, 1.0)
             norm_depth, = renorm_node.renormalize_depth(
                 new_depth,
                 depth_map,
@@ -370,10 +341,9 @@ class PointcloudTrajectoryEnricher:
                 guidance_mask=mask,
                 use_inverse=False,
             )
-
-            # 5) convert inpainted depth->pointcloud for newly filled pixels only
-            new_region = ((hole_mask > 0.5)).float()
-            print("new region area ", new_region.sum().item(), "out of", mask.numel())
+            debug_depth= depth_map
+            # back to pointcloud
+            new_region = hole_mask
             pc_new, = depth2pc_node.depth_to_pointcloud(
                 out_img,
                 camera_type,
@@ -384,12 +354,10 @@ class PointcloudTrajectoryEnricher:
                 mask=new_region,
             )
 
-            # 6) transform new points to world and append
-            M_inv = torch.inverse(M).numpy()
             pc_world, = transform_node.transform_pointcloud(pc_new, M_inv)
-            enriched_pc = torch.cat([enriched_pc, pc_world], dim=0)
+            enriched_pc = torch.cat([enriched_pc, pc_world.to(device)], dim=0)
 
-        return (enriched_pc, debug_img)
+        return enriched_pc, debug_img, debug_depth
     
 
 NODE_CLASS_MAPPINGS = {"FisheyeDepthEstimator": FisheyeDepthEstimator,
