@@ -58,6 +58,7 @@ class FisheyeDepthEstimator:
                 "fisheye_resolution": ("INT",    {"default":4096, "min":64}),
                 "mode":               (["SRC","DST","AVERAGE","SOFTMERGE","DISTANCE_AWARE"], {"default":"AVERAGE"}),
                 "softmerge_radius":   ("INT",    {"default":25,    "min":1, "tooltip":"Gaussian radius for merging"}),
+                "median_blur_kernel": ("INT",    {"default":1,     "min":1, "max":31, "tooltip":"Kernel size for median blur of depthmap"}),
             }
         }
     RETURN_TYPES = ("TENSOR","MASK")
@@ -75,6 +76,7 @@ class FisheyeDepthEstimator:
         fisheye_resolution: int,
         mode: str,
         softmerge_radius: int,
+        median_blur_kernel: int,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # helper nodes
         de_node   = DepthEstimatorNode()
@@ -136,7 +138,7 @@ class FisheyeDepthEstimator:
             )
 
             # estimate pinhole depth
-            depth_pin, = de_node.estimate_depth(img_pin, model_name, depth_scale)
+            depth_pin, = de_node.estimate_depth(img_pin, model_name, depth_scale, median_blur_kernel=median_blur_kernel)
 
             # pinhole → fisheye
             fish_depth, fish_mask = rd_node.reproject_depth(
@@ -200,6 +202,11 @@ class FisheyeDepthEstimator:
 class PointcloudTrajectoryEnricher:
     """
     Enriches a pointcloud along a camera trajectory by outpainting missing regions per view.
+
+    Returns:
+      - enriched_pointcloud: [N,4+] tensor
+      - debug_image:         [1,H,W,3] tensor
+      - debug_depth:         [1,H,W,1] tensor
     """
     @classmethod
     def INPUT_TYPES(cls) -> Dict[str, Dict[str, Any]]:
@@ -225,11 +232,11 @@ class PointcloudTrajectoryEnricher:
                 "voxel_size":            ("FLOAT", {"default":0.07}),
                 "min_points_per_voxel":  ("INT",   {"default":3}),
                 # depth estimation model
-                "model_name": (possible_models, {"default": possible_models[0]}),
+                "model_name":            ("STRING", {"choices": possible_models, "default": possible_models[0]}),
             }
         }
     RETURN_TYPES = ("TENSOR","IMAGE","TENSOR")
-    RETURN_NAMES = ("enriched_pointcloud","debug_image")
+    RETURN_NAMES = ("enriched_pointcloud","debug_image","debug_depth")
     FUNCTION = "enrich_trajectory"
     CATEGORY = "Camera/pointcloud"
 
@@ -253,7 +260,7 @@ class PointcloudTrajectoryEnricher:
         voxel_size: float,
         min_points_per_voxel: int,
         model_name: str,
-    ) -> Tuple[torch.Tensor, torch.Tensor,torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         device = pointcloud.device
 
         # reuse stateless nodes
@@ -275,17 +282,17 @@ class PointcloudTrajectoryEnricher:
                 height=4096,
             )
         enriched_pc = pointcloud
-        debug_img = None
-        debug_depth = None
+        debug_img = torch.zeros((1, height, width, 3), device=device)
+        debug_depth = torch.zeros((1, height, width, 1), device=device)
 
-        # iterate through trajectory
-        for M in tqdm(trajectory[:10], desc="Enriching trajectory"):
+        # loop over trajectory (limit or full)
+        for M in tqdm(trajectory[:30], desc="Enriching trajectory"):
             M_np  = M.cpu().numpy()
             M_inv = np.linalg.inv(M_np)
 
-            # transform and split
+            # transform and select front points
             rotated, = transform_node.transform_pointcloud(enriched_pc, M_np)
-            pc_front = rotated[rotated[:,2] > 0]
+            pc_front = rotated[rotated[:, 2] > 0]
 
             # clean front points
             pc_front, = clean_node.clean_pointcloud(
@@ -296,7 +303,7 @@ class PointcloudTrajectoryEnricher:
                 height=4096,
             )
 
-            # project to image+depth
+            # project to image + depth
             img, mask, depth_map = proj_node.project_pointcloud(
                 pc_front,
                 camera_type,
@@ -306,8 +313,9 @@ class PointcloudTrajectoryEnricher:
                 point_size=3,
                 return_inverse_depth=False,
             )
-
-            # outpaint
+            debug_img = img
+            # fill nan in depthmap with (-1)
+            # outpaint missing regions
             hole_mask = (mask < 0.5).float()
             out_img, out_mask = outpaint_node.outpaint_any(
                 img,
@@ -331,17 +339,32 @@ class PointcloudTrajectoryEnricher:
                 debug               = False,
             )
             debug_img = out_img
-
-            # depth refine using selected model
-            new_depth, = depth_node.estimate_depth(out_img, model_name, 1.0)
+            # estimate and renormalize depth
+            nan_mask = torch.isnan(depth_map)
+            # …and replace them with –1.0 (in-place)
+            depth_map[nan_mask] = -1.0
+            # clip from -1 to 1000
+            depth_map = torch.clamp(depth_map, -1.0, 1000.0)
+            new_depth, = depth_node.estimate_depth(out_img, model_name, depth_scale=1.0)
+            # renormalize depth
             norm_depth, = renorm_node.renormalize_depth(
                 new_depth,
                 depth_map,
-                depth_mask=mask>-1,
-                guidance_mask=mask,
+                depth_mask=(mask>=0.5)*1,
+                guidance_mask=(mask<0.5)*1,
                 use_inverse=False,
             )
-            debug_depth= depth_map
+            # median blur on depth
+            k = 5
+            d = norm_depth.permute(0,3,1,2)  # [B,1,H,W]
+            pad = k//2
+            pd = F.pad(d, (pad, pad, pad, pad), mode='reflect')
+            patches = pd.unfold(2, k, 1).unfold(3, k, 1)
+            patches = patches.contiguous().view(d.shape[0], d.shape[1], d.shape[2], d.shape[3], k*k)
+            d, _ = patches.median(dim=-1)
+            norm_depth = d.permute(0,2,3,1)  # [B,H,W,1]
+            debug_depth = norm_depth
+
             # back to pointcloud
             new_region = hole_mask
             pc_new, = depth2pc_node.depth_to_pointcloud(
@@ -356,7 +379,6 @@ class PointcloudTrajectoryEnricher:
 
             pc_world, = transform_node.transform_pointcloud(pc_new, M_inv)
             enriched_pc = torch.cat([enriched_pc, pc_world.to(device)], dim=0)
-
         return enriched_pc, debug_img, debug_depth
     
 

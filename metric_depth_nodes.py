@@ -25,23 +25,19 @@ _PIPELINES: Dict[str, Any] = {}
 
 class DepthEstimatorNode:
     """
-    A ComfyUI node that runs depth estimation via HuggingFace's depth-anything models,
-    returning only the raw metric-depth tensor.
+    Runs depth estimation via HuggingFace depth-anything models,
+    returning a metric-depth tensor with optional median blur.
     """
-
     @classmethod
     def INPUT_TYPES(cls) -> Dict[str, Any]:
         return {
             "required": {
                 "image": ("IMAGE",),
                 "model_name": ("STRING", {"choices": possible_models, "default": possible_models[0]}),
-                "depth_scale": ("FLOAT", {
-                    "default": 1.0, "min": 0.0, "max": 100.0, "step": 0.01,
-                    "tooltip": "Scale factor for depth values"
-                }),
-            },
+                "depth_scale": ("FLOAT", {"default":1.0, "min":0.0, "max":100.0, "step":0.01}),
+                "median_blur_kernel": ("INT", {"default":1, "min":1, "max":99, "step":2, "tooltip":"Odd kernel size for depth median blur"}),
+            }
         }
-
     RETURN_TYPES = ("TENSOR",)
     RETURN_NAMES = ("depth tensor",)
     FUNCTION = "estimate_depth"
@@ -52,8 +48,9 @@ class DepthEstimatorNode:
         image: torch.Tensor,
         model_name: str,
         depth_scale: float = 1.0,
+        median_blur_kernel: int = 1,
     ) -> Tuple[torch.Tensor]:
-        # lazy-load HuggingFace pipeline
+        # Lazy-load HF pipeline
         if model_name not in _PIPELINES:
             _PIPELINES[model_name] = pipeline(
                 task="depth-estimation",
@@ -61,17 +58,37 @@ class DepthEstimatorNode:
             )
         pipe = _PIPELINES[model_name]
 
-        # BHWC float [1,H,W,3] -> uint8 HxW C
+        # Convert BHWC [1,H,W,3] float to HxW uint8
         img_np = (image[0].cpu().numpy() * 255).astype(np.uint8)
         pil_img = Image.fromarray(img_np)
 
-        # inference
+        # Inference
         out = pipe(pil_img)
-        pred_depth: torch.Tensor = out["predicted_depth"] * depth_scale  # [H,W]
-        # ensure [1,H,W,1]
-        pred_depth = pred_depth.unsqueeze(0).unsqueeze(-1)
+        pred = out["predicted_depth"] * depth_scale  # numpy array or torch?
+        if isinstance(pred, np.ndarray):
+            depth_map = torch.from_numpy(pred)
+        else:
+            depth_map = pred
+        depth_map = depth_map.to(dtype=torch.float32, device=image.device)
 
-        return (pred_depth,)
+        # Depth_map is [H,W]; add batch & channel dims: [1,1,H,W]
+        depth = depth_map.unsqueeze(0).unsqueeze(0)
+
+        # Median blur if kernel > 1
+        k = median_blur_kernel
+        if k > 1:
+            pad = k // 2
+            # pad and unfold for median
+            padded = F.pad(depth, (pad, pad, pad, pad), mode='reflect')
+            # shape [1,1,H+k-1, W+k-1]
+            patches = padded.unfold(2, k, 1).unfold(3, k, 1)
+            # [1,1,H,W,k,k]
+            patches = patches.contiguous().view(1,1,depth.shape[2], depth.shape[3], k*k)
+            depth, _ = patches.median(dim=-1)
+
+        # Final shape [1,H,W,1]
+        depth = depth.permute(0,2,3,1)
+        return (depth,)
 
 
 class DepthToImageNode:

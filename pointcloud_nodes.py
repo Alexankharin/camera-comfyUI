@@ -7,6 +7,8 @@ import os
 import folder_paths
 import logging
 import hashlib
+from kornia.filters import median_blur
+
 from tqdm import tqdm
 # Try importing open3d and its visualization modules; log a warning if not found
 try:
@@ -294,29 +296,32 @@ class TransformPointCloud:
 
 class ProjectPointCloud:
     """
-    Project a point cloud tensor (N,7) back into an image & mask using z-buffering,
-    filtering out points behind the camera (Z<=0), and with adjustable point_size
-    (neighborhood width) to fill any gaps.
-    """
+    Projects a point cloud (N,7) into an image, mask, and depth tensor using GPU-efficient
+    z-buffering. Supports splatting dilation (point_size > 1) via average pooling and mask normalization,
+    filling gaps with preference given to back-facing points.
 
+    Returns:
+      - image: [1,H,W,3]
+      - mask: [H,W]
+      - depth: [1,H,W,1]
+    """
     @classmethod
     def INPUT_TYPES(cls) -> Dict[str, Any]:
         return {
             "required": {
-                "pointcloud":           ("TENSOR",),
-                "output_projection":    (Projection.PROJECTIONS, {}),
+                "pointcloud":            ("TENSOR",),
+                "output_projection":     (Projection.PROJECTIONS, {}),
                 "output_horizontal_fov": ("FLOAT", {"default": 90.0}),
-                "output_width":         ("INT",   {"default": 512,  "min": 1, "max": 16384}),
-                "output_height":        ("INT",   {"default": 512,  "min": 1, "max": 16384}),
-                "point_size":           ("INT",   {"default": 1,    "min": 1}),
-                "return_inverse_depth": ("BOOLEAN", {"default": False, "tooltip": "Return inverse depth"}),
+                "output_width":          ("INT",   {"default": 512, "min": 1}),
+                "output_height":         ("INT",   {"default": 512, "min": 1}),
+                "point_size":            ("INT",   {"default": 1, "min": 1}),
+                "return_inverse_depth":  ("BOOLEAN", {"default": False}),
             }
         }
-
     RETURN_TYPES = ("IMAGE", "MASK", "TENSOR")
-    RETURN_NAMES = ("image", "mask", "depth tensor")
-    FUNCTION     = "project_pointcloud"
-    CATEGORY     = "Camera/pointcloud"
+    RETURN_NAMES = ("image", "mask", "depth")
+    FUNCTION = "project_pointcloud"
+    CATEGORY = "Camera/pointcloud"
 
     def project_pointcloud(
         self,
@@ -332,128 +337,108 @@ class ProjectPointCloud:
         coords = pointcloud[:, :3]
         colors = pointcloud[:, 3:].float()
 
-        # Filter out points behind the camera
-        in_front = coords[:, 2] > 0
-        coords = coords[in_front]
-        colors = colors[in_front]
+        # 1) Filter points in front of the camera
+        mask_front = coords[:, 2] > 0
+        coords = coords[mask_front]
+        colors = colors[mask_front]
 
-        # 1) project & rasterize
-        u, v, depth = self._project(coords, output_projection, output_horizontal_fov)
-        ix, iy    = self._rasterize(u, v, output_width, output_height)
-
-        # 2) z-buffer front pass
-        fg_rgb, fg_alpha, depth_front = self._zbuffer_pass(
-            ix, iy, depth, colors, output_width, output_height, mode="front"
-        )
-
-        # 3) fill holes if needed
-        if point_size > 1:
-            ix2, iy2, depth2, colors2 = self._expand(
-                ix, iy, depth, colors, point_size, output_width, output_height
-            )
-            bg_rgb, bg_alpha, depth_back = self._zbuffer_pass(
-                ix2, iy2, depth2, colors2, output_width, output_height, mode="back"
-            )
-
-            hole = (fg_alpha == 0) & (bg_alpha > 0)
-            fg_rgb[hole]   = bg_rgb[hole]
-            fg_alpha[hole] = 1.0
-            flat_hole = hole.view(-1)
-            # depth_front = depth_front# .clone()
-            depth_front[flat_hole] = depth_back[flat_hole]
-
-        # 4) pack outputs
-        img  = fg_rgb.unsqueeze(0)
-        mask = fg_alpha
-        depthmap = depth_front.view(output_height, output_width)
-
-        if return_inverse_depth:
-            depthmap = 1.0 / depthmap.clamp(min=1e-6)
-        # fill nan and inf with 0
-        mask[depthmap.isnan()] = 0.0
-        depthmap = depthmap.nan_to_num(0.0)
-        # add nans to mask
-        return img, mask, depthmap.unsqueeze(0)*mask
-
-    def _project(self, coords, proj, fov):
+        # 2) Project to normalized UV + depth
         X, Y, Z = coords.unbind(1)
-        if proj == "PINHOLE":
-            return XYZ_to_pinhole(X, Y, Z, fov)
-        elif proj == "FISHEYE":
-            return XYZ_to_fisheye(X, Y, Z, fov)
+        if output_projection == "PINHOLE":
+            u, v, depth = XYZ_to_pinhole(X, Y, Z, output_horizontal_fov)
+        elif output_projection == "FISHEYE":
+            u, v, depth = XYZ_to_fisheye(X, Y, Z, output_horizontal_fov)
         else:
-            return XYZ_to_equirect(X, Y, Z, fov)
+            u, v, depth = XYZ_to_equirect(X, Y, Z, output_horizontal_fov)
 
-    def _rasterize(self, u, v, W, H):
-        px = (u * (W - 1) / 2) + (W - 1) / 2
-        py = (v * (H - 1) / 2) + (H - 1) / 2
-        return px.round().clamp(0, W-1).long(), py.round().clamp(0, H-1).long()
+        # 3) Rasterize to pixel indices
+        px = (u * (output_width - 1) / 2) + (output_width - 1) / 2
+        py = (v * (output_height - 1) / 2) + (output_height - 1) / 2
+        ix = px.round().clamp(0, output_width - 1).long()
+        iy = py.round().clamp(0, output_height - 1).long()
+        pix = iy * output_width + ix
+        M   = output_width * output_height
 
-    def _expand(self, ix, iy, depth, colors, size, W, H):
-        """
-        Expand each point into a size×size square.
-        Offsets centered: size=3 → offsets [-1,0,1].
-        """
-        dev = ix.device
-        # compute centered offsets
-        offsets = torch.arange(size, device=dev) - (size // 2)
-        dx, dy = torch.meshgrid(offsets, offsets, indexing="xy")
-        dx = dx.reshape(-1)  # (K,)
-        dy = dy.reshape(-1)
+        # —— NEW: drop any invalid / NaN→int_min projections ——
+        valid = (pix >= 0) & (pix < M)
+        depth  = depth[valid]
+        colors = colors[valid]
+        pix    = pix[valid]
+        order  = torch.arange(depth.size(0), device=device)
+        # rebuild your "order" to match
 
-        K = dx.numel()
-        # create expanded indices
-        ix2 = ix.unsqueeze(1) + dx  # (N, K)
-        iy2 = iy.unsqueeze(1) + dy
-        ix2 = ix2.clamp(0, W-1).reshape(-1)
-        iy2 = iy2.clamp(0, H-1).reshape(-1)
+        # 4) Allocate or reuse buffers
+        if not hasattr(self, '_z_front') or self._z_front.numel() != M:
+            self._z_front = torch.empty((M,), device=device)
+            self._z_back  = torch.empty((M,), device=device)
+            self._idx     = torch.full((M,), -1, dtype=torch.long, device=device)
+            self._flat    = torch.zeros((M, 4), device=device)
+        z_front = self._z_front
+        z_back  = self._z_back
+        idxbuf  = self._idx
+        flat    = self._flat
 
-        # replicate depth and colors for each neighbor
-        depth2  = depth.unsqueeze(1).expand(-1, K).reshape(-1)
-        colors2 = colors.unsqueeze(1).expand(-1, K, 4).reshape(-1, 4)
+        # 5) Front z-buffer pass (nearest)
+        z_front.fill_(float('inf'))
+        z_front.scatter_reduce_(0, pix, depth, reduce='amin', include_self=True)
+        sel_front = depth == z_front[pix]
+        order = torch.arange(depth.size(0), device=device)
+        order_m = torch.where(sel_front, order, depth.size(0))
+        idxbuf.fill_(depth.size(0))
+        idxbuf.scatter_reduce_(0, pix, order_m, reduce='amin', include_self=True)
+        win_front = order == idxbuf[pix]
 
-        return ix2, iy2, depth2, colors2
+        flat.fill_(0)
+        flat[pix[win_front]] = colors[win_front]
+        img4 = flat.view(output_height, output_width, 4)
+        rgb   = img4[..., :3].clamp(0, 255)
+        alpha = (img4[..., 3] > 0).float()
+        rgb  *= alpha.unsqueeze(-1)
+        depth_img = z_front.view(output_height, output_width)
+        rgb_HR = rgb
 
-    def _zbuffer_pass(self, ix, iy, depth, colors, W, H, mode="front"):
-        """
-        mode="front": keep nearest (amin),
-        mode="back":  keep farthest (amax).
-        Returns:
-            rgb:   (H, W, 3),
-            alpha: (H, W),
-            depth_buffer: flat (H*W,) tensor of the selected depths
-        """
-        pix = iy * W + ix
-        M   = W * H
+        # 6) Back z-buffer pass (farthest) for hole-filling
+        if point_size > 1:
+            z_back.fill_(-float('inf'))
+            z_back.scatter_reduce_(0, pix, depth, reduce='amax', include_self=True)
+            sel_back = depth == z_back[pix]
+            order_m = torch.where(sel_back, order, -1)
+            idxbuf.fill_(-1)
+            idxbuf.scatter_reduce_(0, pix, order_m, reduce='amax', include_self=True)
+            win_back = idxbuf[pix] >= 0
 
-        if mode == "front":
-            init, red = float('inf'), 'amin'
-        else:
-            init, red = -float('inf'), 'amax'
+            flat.fill_(0)
+            flat[pix[win_back]] = colors[win_back]
+            back4 = flat.view(output_height, output_width, 4)
+            rgb_back   = back4[..., :3].clamp(0,255)
+            alpha_back = (back4[..., 3] > 0).float()
 
-        # 1) construct empty depth‐buffer and scatter in your depths
-        depth_buffer = torch.full((M,), init, device=ix.device)
-        depth_buffer.scatter_reduce_(0, pix, depth, reduce=red, include_self=True)
+            # fill holes where front missed
+            hole = (alpha == 0) & (alpha_back > 0)
+            rgb[hole]       = rgb_back[hole]
+            alpha[hole]     = 1.0
+            depth_img[hole] = z_back.view(output_height, output_width)[hole]
 
-        # 2) find which point “wins” per pixel
-        sel = depth == depth_buffer[pix]
-        order = torch.arange(depth.shape[0], device=ix.device)
-        order_m = torch.where(sel, order, torch.full_like(order, depth.shape[0]))
-        best_o = torch.full((M,), depth.shape[0], device=ix.device)
-        best_o.scatter_reduce_(0, pix, order_m, reduce='amin', include_self=True)
-        win = order == best_o[pix]
+            # 7) Median-filter _only_ in hole regions
+            if hole.any():
+                # prepare for kornia median_blur: [B,C,H,W]
+                rgb_t   = rgb.permute(2,0,1).unsqueeze(0)  # [1,3,H,W]
+                # apply median filter
+                rgb_med = median_blur(rgb_t, (point_size, point_size))
+                # back to HWC
+                rgb_med = rgb_med.squeeze(0).permute(1,2,0)
+                # merge only at hole locations
+                rgb[hole] = rgb_med[hole]
+                # alpha already set to 1.0 for holes
 
-        # 3) scatter the winning colors into a flat RGBA image
-        flat = torch.zeros((M,4), device=ix.device)
-        flat[pix[win]] = colors[win]
-
-        # unpack
-        img4 = flat.view(H, W, 4)
-        rgb  = img4[..., :3].clamp(0,255)
-        a    = (img4[..., 3] > 0).float()
-        rgb *= a.unsqueeze(-1)
-
-        return rgb, a, depth_buffer
+        # 8) Pack and return with original script shapes
+        img       = rgb.unsqueeze(0)  # [1,H,W,3]
+        mask_out  = alpha             # [H,W]
+        depth4    = depth_img.unsqueeze(0).unsqueeze(-1)  # [1,H,W,1]
+        if return_inverse_depth:
+            depth4 = 1.0 / depth4.clamp(min=1e-6)
+        depth4 = depth4 * mask_out.unsqueeze(0).unsqueeze(-1)
+        return img, mask_out, depth4
 
 class PointCloudUnion:
     """
@@ -931,9 +916,15 @@ class PointCloudCleaner:
 
         # 4) Invert depth and normalize so that max(inv_depth) == width/2
         inv_depth = 1.0 / (depth + 1e-6)
-        inv_max = inv_depth.max()
-        inv_min = inv_depth.min()
-        inv_norm = (inv_depth-inv_min) / (inv_max-inv_min)*(width) # 0-W/2
+        # make 95 percentile range. Sample down to 1e6 points since quantile is limited
+        inv = inv_depth.view(-1)
+        N   = inv.numel()
+        # sample up to 1e6 points
+        k   = min(N, 1000000)
+        idx = torch.randperm(N, device=inv.device)[:k]
+        sample = inv[idx]
+        q95    = torch.quantile(sample, 0.95)
+        inv_norm = inv_depth / q95 * (width/8)
 
         # 5) Build voxel indices in [px,py,inv_norm] space
         uvz = torch.stack([px, py, inv_norm], dim=1)
