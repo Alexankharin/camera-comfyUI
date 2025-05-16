@@ -368,53 +368,101 @@ class DepthRenormalizer:
         guidance_mask: torch.Tensor,
         use_inverse: bool = False
     ) -> Tuple[torch.Tensor]:
+        """
+        Fit a centrally‐symmetric affine transform
+            out = A(x,y) * d + B(x,y),
+        where
+            A(x,y) = a0 + a1*(x-0.5)**2 + a2*(y-0.5)**2
+            B(x,y) = b0 + b1*(x-0.5)**2 + b2*(y-0.5)**2
+        so that it best matches guidance_depth over valid pixels,
+        then apply it everywhere (including holes).
+        """
         # collapse [1,H,W,1] → [H,W]
-        # mask is 11HW
-        dm= depth_mask.squeeze(0).squeeze(0)
-        gm= guidance_mask.squeeze(0).squeeze(0)
         def hw(t):
             t = t.squeeze(0).squeeze(-1)
             if t.dim() == 3:
                 t = t.mean(dim=2)
             return t
 
-        d  = hw(depth)
-        gd = hw(guidance_depth)
+        d   = hw(depth)           # [H,W]
+        gd  = hw(guidance_depth)  # [H,W]
+        dm  = hw(depth_mask)  > 0.5
+        gm  = hw(guidance_mask) > 0.5
 
-        # 1) Intersection mask of valid depth & guidance
-        mask = (dm > 0.5) & (gm > 0.5)
-
-        # 2) (optional) dilate & blur that mask to soften edges
-        kernel = torch.ones((1,1,3,3), device=d.device)
-        m_dil = torch.nn.functional.conv2d(mask.unsqueeze(0).unsqueeze(0)*1.0, kernel, padding=1) > 0
-        m_smooth = torchvision.transforms.functional.gaussian_blur(
-            m_dil.float(), (11,11), sigma=(5,5)
-        ) > 0.5
-        mask = m_smooth.squeeze(0).squeeze(0)
-
+        # choose linear or inverse-depth space
         eps = 1e-6
-        # 3) choose working space
         if use_inverse:
             d_work  = 1.0 / d.clamp(min=eps)
             gd_work = 1.0 / gd.clamp(min=eps)
         else:
             d_work, gd_work = d, gd
 
-        # 4) compute a single linear scale & offset over the masked region
-        vals_d  = d_work[mask]
-        vals_gd = gd_work[mask]
-        if vals_d.numel() == 0:
-            # nothing to renormalize
-            out = d
+        # valid pixels for fitting
+        valid = dm & (d_work > 0) & (gd_work > 0)
+        # remove nan and inf from valid mask
+        valid = valid & (~torch.isnan(d_work)) & (~torch.isinf(d_work))
+        # erode valid mask by 2 pixels
+        valid = F.max_pool2d(-valid.float().unsqueeze(0), kernel_size=5, stride=1, padding=2).squeeze(0) < -0.5
+        if valid.sum() < 6:
+            # fallback to global linear if too few
+            vals_d  = d_work[valid]
+            vals_gd = gd_work[valid]
+            scale   = (vals_gd.std(unbiased=False)+eps)/(vals_d.std(unbiased=False)+eps)
+            offset  = vals_gd.mean() - scale*vals_d.mean()
+            out_work = d_work*scale + offset
+
         else:
-            scale  = (vals_gd.std(unbiased=False) + eps) / (vals_d.std(unbiased=False) + eps)
-            offset = vals_gd.mean() - vals_d.mean() * scale
-            out = d * scale + offset
+            H, W = d_work.shape
+            ys = torch.arange(H, device=d_work.device, dtype=d_work.dtype)
+            xs = torch.arange(W, device=d_work.device, dtype=d_work.dtype)
+            yy, xx = torch.meshgrid(ys, xs, indexing='ij')
 
-            if use_inverse:
-                out = 1.0 / out.clamp(min=eps)
+            # normalized in [0,1], then center at 0
+            xi = (xx / (W-1)) - 0.5
+            yi = (yy / (H-1)) - 0.5
+            xi2 = xi**2
+            yi2 = yi**2
 
+            # pick out valid pixels
+            dv  = d_work[valid]       # [N]
+            gv  = gd_work[valid]      # [N]
+            xiv = xi[valid]           # [N]
+            yiv = yi[valid]           # [N]
+            xiv2= xi2[valid]          # [N]
+            yiv2= yi2[valid]          # [N]
+
+            # design matrix: columns for [dv, dv*x, dv*y, dv*x2, dv*y2, 1, x, y, x2, y2]
+            X = torch.stack([
+                dv,
+                dv * xiv,
+                dv * yiv,
+                dv * xiv2,
+                dv * yiv2,
+                torch.ones_like(dv),
+                xiv,
+                yiv,
+                xiv2,
+                yiv2
+            ], dim=1)  # -> [N,10]
+            y = gv.unsqueeze(1)        # [N,1]
+
+            # solve least-squares for 10 coefficients
+            sol = torch.linalg.lstsq(X, y).solution.squeeze(1)
+            a0, a1, a2, a3, a4, b0, b1, b2, b3, b4 = sol.unbind(0)
+
+            # build full A_map, B_map
+            A_map = a0 + a1*xi + a2*yi + a3*xi2 + a4*yi2
+            B_map = b0 + b1*xi + b2*yi + b3*xi2 + b4*yi2
+
+            # apply everywhere
+            out_work = A_map * d_work + B_map
+
+        # convert back if inverse-depth
+        out = (1.0 / out_work.clamp(min=eps)) if use_inverse else out_work
+        # print("out", out.shape, out.min(), out.max(), out.mean(), out.std(), "valid", valid.sum(),dv.sum(),gv.sum())
+        # restore [1,H,W,1]
         return (out.unsqueeze(0).unsqueeze(-1),)
+    
 
 NODE_CLASS_MAPPINGS = {
     "DepthEstimatorNode": DepthEstimatorNode,

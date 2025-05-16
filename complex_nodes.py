@@ -281,10 +281,9 @@ class PointcloudTrajectoryEnricher:
                 width=4096,
                 height=4096,
             )
-        enriched_pc = pointcloud
         debug_img = torch.zeros((1, height, width, 3), device=device)
         debug_depth = torch.zeros((1, height, width, 1), device=device)
-
+        enriched_pc = pointcloud
         # loop over trajectory (limit or full)
         for M in tqdm(trajectory[:30], desc="Enriching trajectory"):
             M_np  = M.cpu().numpy()
@@ -342,9 +341,9 @@ class PointcloudTrajectoryEnricher:
             # estimate and renormalize depth
             nan_mask = torch.isnan(depth_map)
             # …and replace them with –1.0 (in-place)
-            depth_map[nan_mask] = -1.0
+            depth_map[nan_mask] = 0
             # clip from -1 to 1000
-            depth_map = torch.clamp(depth_map, -1.0, 1000.0)
+            depth_map = torch.clamp(depth_map, 0, 1000.0)
             new_depth, = depth_node.estimate_depth(out_img, model_name, depth_scale=1.0)
             # renormalize depth
             norm_depth, = renorm_node.renormalize_depth(
@@ -363,10 +362,9 @@ class PointcloudTrajectoryEnricher:
             patches = patches.contiguous().view(d.shape[0], d.shape[1], d.shape[2], d.shape[3], k*k)
             d, _ = patches.median(dim=-1)
             norm_depth = d.permute(0,2,3,1)  # [B,H,W,1]
-            debug_depth = norm_depth
+            debug_depth = norm_depth*hole_mask.unsqueeze(0).unsqueeze(-1)+depth_map*(1-hole_mask.unsqueeze(0).unsqueeze(-1))
 
             # back to pointcloud
-            new_region = hole_mask
             pc_new, = depth2pc_node.depth_to_pointcloud(
                 out_img,
                 camera_type,
@@ -374,12 +372,13 @@ class PointcloudTrajectoryEnricher:
                 depth_scale=1.0,
                 invert_depth=False,
                 depthmap=norm_depth,
-                mask=new_region,
+                mask=hole_mask,
             )
 
             pc_world, = transform_node.transform_pointcloud(pc_new, M_inv)
+            # enriched_pc is not rotated
             enriched_pc = torch.cat([enriched_pc, pc_world.to(device)], dim=0)
-        return enriched_pc, debug_img, debug_depth
+        return enriched_pc, debug_img, norm_depth
     
 
 NODE_CLASS_MAPPINGS = {"FisheyeDepthEstimator": FisheyeDepthEstimator,
