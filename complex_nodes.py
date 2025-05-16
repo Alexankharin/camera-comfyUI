@@ -139,7 +139,10 @@ class FisheyeDepthEstimator:
 
             # estimate pinhole depth
             depth_pin, = de_node.estimate_depth(img_pin, model_name, depth_scale, median_blur_kernel=median_blur_kernel)
-
+            depth_pin, = z2r_node.depth_to_ray_depth(
+                depth_pin,
+                pinhole_fov,
+            )
             # pinhole → fisheye
             fish_depth, fish_mask = rd_node.reproject_depth(
                 depth_pin,
@@ -271,6 +274,7 @@ class PointcloudTrajectoryEnricher:
         depth2pc_node  = DepthToPointCloud()
         transform_node = TransformPointCloud()
         clean_node     = PointCloudCleaner()
+        zdepth_node   = ZDepthToRayDepthNode()
 
         # initial clean on GPU
         with torch.no_grad():
@@ -285,7 +289,7 @@ class PointcloudTrajectoryEnricher:
         debug_depth = torch.zeros((1, height, width, 1), device=device)
         enriched_pc = pointcloud
         # loop over trajectory (limit or full)
-        for M in tqdm(trajectory[:30], desc="Enriching trajectory"):
+        for M in tqdm(trajectory[:15], desc="Enriching trajectory"):
             M_np  = M.cpu().numpy()
             M_inv = np.linalg.inv(M_np)
 
@@ -345,6 +349,10 @@ class PointcloudTrajectoryEnricher:
             # clip from -1 to 1000
             depth_map = torch.clamp(depth_map, 0, 1000.0)
             new_depth, = depth_node.estimate_depth(out_img, model_name, depth_scale=1.0)
+            new_depth, = zdepth_node.depth_to_ray_depth(
+                new_depth,
+                horizontal_fov,
+            )
             # renormalize depth
             norm_depth, = renorm_node.renormalize_depth(
                 new_depth,
