@@ -403,7 +403,7 @@ class ProjectPointCloud:
             z_back.scatter_reduce_(0, pix, depth, reduce='amax', include_self=True)
             sel_back = depth == z_back[pix]
             order_m = torch.where(sel_back, order, -1)
-            idxbuf.fill(-1)
+            idxbuf.fill_(-1)
             idxbuf.scatter_reduce_(0, pix, order_m, reduce='amax', include_self=True)
             win_back = idxbuf[pix] >= 0
 
