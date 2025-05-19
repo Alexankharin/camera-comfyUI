@@ -433,8 +433,8 @@ class ReprojectDepth:
                 "output_horizontal_fov": ("FLOAT", {"default": 90.0, "min": 0.0, "max": 360.0, "step": 1.0}),
                 "input_projection": (Projection.PROJECTIONS, {"tooltip": "input projection type"}),
                 "output_projection": (Projection.PROJECTIONS, {"tooltip": "output projection type"}),
-                "output_width": ("INT", {"default": 0, "min": 0, "max": 8192, "step": 8}),
-                "output_height": ("INT", {"default": 0, "min": 0, "max": 8192, "step": 8}),
+                "output_width": ("INT", {"default": 0, "min": 0, "max": 16384, "step": 8}),
+                "output_height": ("INT", {"default": 0, "min": 0, "max": 16384, "step": 8}),
                 "transform_matrix": ("MAT_4X4", {"default": None}),
                 "inverse": ("BOOLEAN", {"default": False}),
             }

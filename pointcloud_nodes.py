@@ -312,8 +312,8 @@ class ProjectPointCloud:
                 "pointcloud":            ("TENSOR",),
                 "output_projection":     (Projection.PROJECTIONS, {}),
                 "output_horizontal_fov": ("FLOAT", {"default": 90.0}),
-                "output_width":          ("INT",   {"default": 512, "min": 1}),
-                "output_height":         ("INT",   {"default": 512, "min": 1}),
+                "output_width":          ("INT",   {"default": 512, "min": 1, "max": 16384}),
+                "output_height":         ("INT",   {"default": 512, "min": 1, "max": 16384}),
                 "point_size":            ("INT",   {"default": 1, "min": 1}),
                 "return_inverse_depth":  ("BOOLEAN", {"default": False}),
             }
@@ -637,8 +637,8 @@ class CameraMotionNode:
             "n_points":            ("INT",    {"default":10, "min":2, "step":1}),
             "output_projection":   (Projection.PROJECTIONS, {}),
             "output_horizontal_fov": ("FLOAT", {"default":90.0}),
-            "output_width":        ("INT",    {"default":512, "min":8, "max":8192}),
-            "output_height":       ("INT",    {"default":512, "min":8, "max":8192}),
+            "output_width":        ("INT",    {"default":512, "min":8, "max":16384}),
+            "output_height":       ("INT",    {"default":512, "min":8, "max":16384}),
             "point_size":          ("INT",    {"default":1,   "min":1}),
         }}
 
@@ -881,8 +881,8 @@ class PointCloudCleaner:
         return {
             "required": {
                 "pointcloud":             ("TENSOR",),
-                "width":                  ("INT",   {"default":1024, "min":1}),
-                "height":                 ("INT",   {"default":1024, "min":1}),
+                "width":                  ("INT",   {"default":1024, "min":1, "max":16384}),
+                "height":                 ("INT",   {"default":1024, "min":1, "max":16384}),
                 "voxel_size":             ("FLOAT", {"default":1.0,   "min":1e-3}),
                 "min_points_per_voxel":   ("INT",   {"default":3,     "min":1}),
             }
@@ -956,8 +956,8 @@ class ProjectAndClean:
                 "matrix":          ("MAT_4X4",),
                 "projection":      (Projection.PROJECTIONS, {}),
                 "fov":             ("FLOAT", {"default": 90.0}),
-                "width":           ("INT",   {"default": 512, "min": 1}),
-                "height":          ("INT",   {"default": 512, "min": 1}),
+                "width":           ("INT",   {"default": 512, "min": 1, "max": 16384}),
+                "height":          ("INT",   {"default": 512, "min": 1, "max": 16384}),
                 "mode":            (["erode", "open"], {"default": "erode"}),
                 "num_iterations":  ("INT",   {"default": 1, "min": 1, "max": 10}),
                 "kernel_size":     ("INT",   {"default": 3, "min": 1, "max": 99, "step": 2}),
