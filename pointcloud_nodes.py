@@ -403,7 +403,7 @@ class ProjectPointCloud:
             z_back.scatter_reduce_(0, pix, depth, reduce='amax', include_self=True)
             sel_back = depth == z_back[pix]
             order_m = torch.where(sel_back, order, -1)
-            idxbuf.fill_(-1)
+            idxbuf.fill(-1)
             idxbuf.scatter_reduce_(0, pix, order_m, reduce='amax', include_self=True)
             win_back = idxbuf[pix] >= 0
 
@@ -637,8 +637,8 @@ class CameraMotionNode:
             "n_points":            ("INT",    {"default":10, "min":2, "step":1}),
             "output_projection":   (Projection.PROJECTIONS, {}),
             "output_horizontal_fov": ("FLOAT", {"default":90.0}),
-            "output_width":        ("INT",    {"default":512, "min":8, "max":16384}),
-            "output_height":       ("INT",    {"default":512, "min":8, "max":16384}),
+            "output_width":        ("INT",    {"default":512, "min":8, "max":8192}),
+            "output_height":       ("INT",    {"default":512, "min":8, "max":8192}),
             "point_size":          ("INT",    {"default":1,   "min":1}),
         }}
 

@@ -29,12 +29,12 @@ class OutpaintAnyProjection:
                 "input_horiz_fov":      ("FLOAT",  {"default": 90.0,"min": 0.0,  "max": 360.0}),
                 "output_projection":    (Projection.PROJECTIONS, {"tooltip": "final projection"}),
                 "output_horiz_fov":     ("FLOAT",  {"default":180.0,"min": 0.0,  "max": 360.0}),
-                "output_width":         ("INT",    {"default":4096, "min":1,    "max":16384}),
-                "output_height":        ("INT",    {"default":4096, "min":1,    "max":16384}),
+                "output_width":         ("INT",    {"default":4096, "min":1,    "max":8192}),
+                "output_height":        ("INT",    {"default":4096, "min":1,    "max":8192}),
                 # — patch extraction / outpaint —
                 "patch_projection":     (Projection.PROJECTIONS, {"tooltip": "patch projection"}),
                 "patch_horiz_fov":      ("FLOAT",  {"default": 90.0,"min":1.0,  "max":180.0}),
-                "patch_res":            ("INT",    {"default":1024, "min":1,    "max":4096}),
+                "patch_res":            ("INT",    {"default":1024, "min":1,    "max":8192}),
                 "patch_phi":            ("FLOAT",  {"default":45.0, "min":-180.0,"max":180.0}),
                 "patch_theta":          ("FLOAT",  {"default": 0.0, "min": -90.0,"max": 90.0}),
                 # — Flux NF4 inpainting settings —

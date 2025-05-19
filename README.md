@@ -37,7 +37,7 @@ A collection of ComfyUI custom nodes to handle diverse camera projections (pinho
 1. **Clone** into your ComfyUI custom nodes folder:
 
    ```bash
-   git clone https://github.com/your-repo/camera-comfyUI.git custom_nodes/camera-comfyUI
+   git clone https://github.com/Alexankharin/camera-comfyUI.git custom_nodes/camera-comfyUI
    ```
 
 2. **System Dependencies (Ubuntu)**:
@@ -56,8 +56,13 @@ A collection of ComfyUI custom nodes to handle diverse camera projections (pinho
 
 4. **Additional Nodes** (for certain workflows):
 
-   * [ComfyUI-Flux-Inpainting](https://github.com/rubi-du/ComfyUI-Flux-Inpainting)
-   * [ComfyUI-Image-Filters](https://github.com/spacepxl/ComfyUI-Image-Filters)
+   * Clone the following repositories directly into your `custom_nodes` folder:
+     * [ComfyUI-Flux-Inpainting](https://github.com/rubi-du/ComfyUI-Flux-Inpainting)
+     * [ComfyUI-Image-Filters](https://github.com/spacepxl/ComfyUI-Image-Filters)
+   * **Important:** If the `ComfyUI-Flux-Inpainting` repository is cloned as `ComfyUI-Flux-Inpainting-main`, rename the folder to `inpainting_flux`:
+     ```bash
+     mv custom_nodes/ComfyUI-Flux-Inpainting-main custom_nodes/inpainting_flux
+     ```
 
 5. **Flux Models** (Hugging Face):
 
@@ -204,3 +209,4 @@ Contributions welcome! Please open issues or PRs to add features, improve docs, 
 * [x] Implement easier and more flexible camera control - more complex camera movements with more than 2 points.
 * [x] Add more examples and documentation for each node.
 * [x] Add pointcloud union
+* [ ] Fix imports for renamed folders (e.g., inpainting_flux)

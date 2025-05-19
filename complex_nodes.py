@@ -55,7 +55,7 @@ class FisheyeDepthEstimator:
                 "depth_scale":        ("FLOAT",  {"default":1.0, "min":0.0, "max":1000.0, "step":0.01}),
                 "pinhole_fov":        ("FLOAT",  {"default":90.0, "min":1.0, "max":179.0}),
                 "pinhole_resolution": ("INT",    {"default":1024, "min":64}),
-                "fisheye_resolution": ("INT",    {"default":4096, "min":64}),
+                "fisheye_resolution": ("INT",    {"default":4096, "min":64, "max":8192}),
                 "mode":               (["SRC","DST","AVERAGE","SOFTMERGE","DISTANCE_AWARE"], {"default":"AVERAGE"}),
                 "softmerge_radius":   ("INT",    {"default":25,    "min":1, "tooltip":"Gaussian radius for merging"}),
                 "median_blur_kernel": ("INT",    {"default":1,     "min":1, "max":31, "tooltip":"Kernel size for median blur of depthmap"}),
