@@ -129,7 +129,7 @@ class OutpaintAnyProjection:
         patch_mask = torch.ones_like(patch_mask) * 1 if debug else patch_mask
         # 5) Reproject inpainted patch back
        
-        back_img, back_mask = reproj.reproject_image(
+        back_img, inpainted_patch_reproj_mask_raw = reproj.reproject_image( # Store raw mask output
         inpainted_patch,
         patch_horiz_fov, output_horiz_fov,
         patch_projection, output_projection,
@@ -138,19 +138,37 @@ class OutpaintAnyProjection:
         transform_matrix=rot_m,
         feathering=0,
         )
-        back_mask = normalize_mask(back_mask).bool()    # True where patch contributes
+        # inpainted_patch_coverage_mask: 1.0 where the reprojected inpainted patch has content, 0.0 otherwise.
+        inpainted_patch_coverage_mask = normalize_mask(back_mask) # Ensure it's float [0,1]
 
-        # original coverage: True = had data, False = hole
-        orig_covered = ~base_mask.bool()
-        base_img=base_img * orig_covered.unsqueeze(-1)
-        # fill only holes where back_mask is False
-        filled = back_img * (~back_mask.unsqueeze(-1))*base_mask.unsqueeze(-1)
-        final_img = base_img+filled
+        # --- Define Masks based on Conventions ---
+        # base_mask: 1.0 where original reprojected image has content, 0.0 for holes.
+        # initial_hole_mask: 1.0 where original reprojected image has holes (inverse of base_mask).
+        initial_hole_mask = 1.0 - base_mask
+        # inpainted_patch_coverage_mask: 1.0 where reprojected inpainted patch has content.
 
-        # anything that’s still a hole after back‐projection needs inpaint
-        needs_inpaint = (~((orig_covered) | (~back_mask))).to(torch.float32)
+        # --- Compositing Logic ---
+        # Goal: Inpainted patch takes precedence in overlapping areas. Original content is used elsewhere.
 
-        return final_img, needs_inpaint
+        # Contribution from the original image:
+        # Valid original pixels, excluding areas covered by the inpainted patch.
+        original_content_contribution = base_img * base_mask.unsqueeze(-1) * \
+                                          (1.0 - inpainted_patch_coverage_mask.unsqueeze(-1))
+        
+        # Contribution from the inpainted patch (reprojected as back_img):
+        # Valid inpainted pixels, where the patch provides coverage.
+        inpainted_patch_contribution = back_img * inpainted_patch_coverage_mask.unsqueeze(-1)
+
+        # Combine:
+        final_img = original_content_contribution + inpainted_patch_contribution
+
+        # --- needs_inpaint_mask Derivation ---
+        # Identifies areas that were initially holes AND remain un-filled by the reprojected inpainted patch.
+        # These are areas that still require inpainting if a further pass was to be made.
+        not_covered_by_inpainted_patch = 1.0 - inpainted_patch_coverage_mask
+        needs_inpaint_mask = initial_hole_mask * not_covered_by_inpainted_patch # Element-wise multiplication (AND logic)
+
+        return final_img, needs_inpaint_mask
 
 # register
 NODE_CLASS_MAPPINGS = {
