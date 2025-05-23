@@ -132,6 +132,7 @@ A set of JSON workflows illustrating typical use cases. Each workflow lives in `
 | **Pointcloud.json**                    | Metric‐depth‐anything v2 → point cloud → camera view synthesis |
 | **pointcloud\_inpaint.json**           | Inpaint + backproject to 3D for dynamic camera motion videos   |
 | **Pointcloud\_walker.json**            | GUI‐based camera control via Open3D                            |
+| **sbs180\_workflow.json**              | Generate stereo (side-by-side) wide-angle/fisheye/equirectangular stereo pairs from a high-res input |
 
 ---
 
@@ -190,6 +191,12 @@ Inpaint image with shifted camera and backproject for dynamic camera‐driven vi
 <img src="demo_images/Fisheye_camera_pointcloud_moved_outpainted.png" alt="PointCloud Inpaint" width="40%" />
 <img src="demo_images/Camera_interpolation_pointcloud.gif" alt="PointCloud Inpaint Video" width="40%" />
 
+### 9. `sbs180_workflow.json`
+
+Take a wide-angle (fisheye or equirectangular) high-resolution (e.g., 4096×4096) image and generate a stereo pair by moving the camera horizontally. The output is a wide-angle stereo pair (side-by-side), simulating a fisheye or equirectangular stereo camera.
+
+<img src="demo_images/equirect_stereo.gif" alt="Equirectangular Stereo Demo" width="80%" />
+
 ### 10. `Pointcloud_walker.json`
 
 Interactive Open3D-based GUI for walking and setting camera trajectory inside pointcloud.
@@ -202,7 +209,7 @@ Contributions welcome! Please open issues or PRs to add features, improve docs, 
 
 ## TODO List
 
-* [ ] Add processing to pointcloud or depthmap to remove outlier and lonely points at depth borders.
+* [x] Add processing to pointcloud or depthmap to remove outlier and lonely points at depth borders.
 * [x] Use built-in comfyUI mask type an image.
 * [x] Unite nodes into groups to simplify workflows.
 * [ ] Create a single workflow for view synthesis.
@@ -210,3 +217,4 @@ Contributions welcome! Please open issues or PRs to add features, improve docs, 
 * [x] Add more examples and documentation for each node.
 * [x] Add pointcloud union
 * [ ] Fix imports for renamed folders (e.g., inpainting_flux)
+* [ ] Integrate camera movement pipeline with video models (e.g., wan2.1) for smooth, high-quality inpainting along camera trajectories.
