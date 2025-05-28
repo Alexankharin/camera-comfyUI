@@ -1,5 +1,5 @@
 # camera-comfyUI
-
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/Alexankharin/camera-comfyUI)
 ![ComfyUI Custom Nodes](demo_images/Camera_interpolation_pointcloud.gif)
 
 > Custom ComfyUI nodes for advanced reprojections, point cloud processing, and camera-driven workflows.
