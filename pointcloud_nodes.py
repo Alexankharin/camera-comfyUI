@@ -523,6 +523,9 @@ class LoadPointCloud:
                     colors.append((r, g, b, a))
             np_coords = np.array(coords, dtype=np.float32)
             np_colors = np.array(colors, dtype=np.float32)
+            # if colors are > 1, normalize them to [0,1]
+            if np_colors.max() > 1.0:
+                np_colors = np_colors / 255.0
         else:
             pc = o3d.t.io.read_point_cloud(file_path)
             np_coords = pc.point["positions"].numpy().astype(np.float32)
@@ -535,7 +538,9 @@ class LoadPointCloud:
             else:
                 alpha = np.ones((np_coords.shape[0], 1), dtype=np.float32)
             np_colors = np.concatenate([cols, alpha], axis=1)
-
+            if np_colors.max() > 1.0:
+                np_colors = np_colors / 255.0
+        # combine coords and colors into a single tensor
         combined = np.concatenate([np_coords, np_colors], axis=1)
         tensor_pc = torch.from_numpy(combined)
         return (tensor_pc,)
