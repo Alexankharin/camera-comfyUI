@@ -673,10 +673,13 @@ class CameraMotionNode:
             "output_width":        ("INT",    {"default":512, "min":8, "max":16384}),
             "output_height":       ("INT",    {"default":512, "min":8, "max":16384}),
             "point_size":          ("INT",    {"default":1,   "min":1}),
+            "widen_mask":         ("INT",    {"default":0, "min":0, "max":64}),
+            "invert_mask":        ("BOOLEAN", {"default": False}),
+            "points_to_mask":     ("BOOLEAN", {"default": False, "tooltip": "Output mask frames of projected points"}),
         }}
 
-    RETURN_TYPES = ("IMAGE",)
-    RETURN_NAMES = ("motion_frames",)
+    RETURN_TYPES = ("IMAGE", "MASK")
+    RETURN_NAMES = ("motion_frames", "mask_frames")
     FUNCTION      = "generate_motion_frames"
     CATEGORY      = "Camera/pointcloud"
 
@@ -689,7 +692,10 @@ class CameraMotionNode:
         output_horizontal_fov: float,
         output_width:          int,
         output_height:         int,
-        point_size:            int = 1
+        point_size:            int = 1,
+        widen_mask:           int = 0,
+        invert_mask:          bool = False,
+        points_to_mask:       bool = False
     ) -> Tuple[torch.Tensor]:
         # validate trajectory shape
         if trajectory.dim() != 3 or trajectory.shape[1:] != (4,4):
@@ -716,9 +722,10 @@ class CameraMotionNode:
         proj_node      = ProjectPointCloud()
         transform_node = TransformPointCloud()
         frames = []
+        masks  = []
         for M in tqdm(full_traj):
             pc_t, = transform_node.transform_pointcloud(pointcloud, M)
-            img, _, _ = proj_node.project_pointcloud(
+            img, mask, _ = proj_node.project_pointcloud(
                 pc_t,
                 output_projection,
                 output_horizontal_fov,
@@ -726,10 +733,19 @@ class CameraMotionNode:
                 output_height,
                 point_size
             )
+            if widen_mask > 0:
+                k = 2 * widen_mask + 1
+                pad = widen_mask
+                mask = F.max_pool2d(mask.float().unsqueeze(0).unsqueeze(0), kernel_size=k, stride=1, padding=pad).squeeze(0).squeeze(0)
+            if invert_mask:
+                mask = 1.0 - mask
+            masks.append(mask)
+            if points_to_mask:
+                img = mask.unsqueeze(-1).repeat(1,1,1,3)
             frames.append(img[0])
 
         # output as (T,H,W,3)
-        return (torch.stack(frames, dim=0),)
+        return (torch.stack(frames, dim=0), torch.stack(masks, dim=0))
 
 class CameraInterpolationNode:
     """
