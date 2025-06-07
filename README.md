@@ -110,7 +110,7 @@ A collection of ComfyUI custom nodes to handle diverse camera projections (pinho
 | `ZDepthToRayDepthNode`    | Converts Z-depth (output of metric-depth-anything) to ray depth to compensate lens curvature.                        |
 | `TransformPointCloud`     | Applies 4×4 rotation matrix to point cloud                                    |
 | `ProjectPointCloud`       | Z-buffer–based projection of point cloud into image + mask.                   |
-| `CameraMotionNode`        | Generates image sequences by moving camera along a trajectory.                |
+| `CameraMotionNode`        | Generates image and mask sequences along a camera trajectory with optional mask dilation/inversion. |
 | `CameraInterpolationNode` | Builds a trajectory tensor from two poses.                                    |
 | `CameraTrajectoryNode`    | Interactive Open3D GUI for recording camera waypoints.                        |
 | `PointCloudCleaner`       | Removes isolated points via voxel filtering.                                  |
