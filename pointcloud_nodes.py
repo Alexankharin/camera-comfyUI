@@ -504,24 +504,45 @@ class LoadPointCloud:
             arr = np.load(file_path)
             tensor_pc = torch.from_numpy(arr)
             return (tensor_pc,)
-        coords = []
-        colors = []
-        with open(file_path, 'r') as f:
-            line = f.readline().strip()
-            while not line.startswith("end_header"):
+
+        if o3d is None:
+            logging.warning("[camera-comfyUI] open3d is not installed. Falling back to manual PLY parser.")
+            coords = []
+            colors = []
+            with open(file_path, 'r') as f:
                 line = f.readline().strip()
-            for line in f:
-                parts = line.strip().split()
-                if len(parts) < 7:
-                    continue
-                x, y, z = map(float, parts[0:3])
-                r, g, b, a = map(int, parts[3:7])
-                coords.append((x, y, z))
-                colors.append((r, g, b, a))
-        np_coords  = np.array(coords,  dtype=np.float32)
-        np_colors  = np.array(colors,  dtype=np.float32)/255.0
-        combined   = np.concatenate([np_coords, np_colors], axis=1)
-        tensor_pc  = torch.from_numpy(combined)
+                while not line.startswith("end_header"):
+                    line = f.readline().strip()
+                for line in f:
+                    parts = line.strip().split()
+                    if len(parts) < 7:
+                        continue
+                    x, y, z = map(float, parts[0:3])
+                    r, g, b, a = map(float, parts[3:7])
+                    coords.append((x, y, z))
+                    colors.append((r, g, b, a))
+            np_coords = np.array(coords, dtype=np.float32)
+            np_colors = np.array(colors, dtype=np.float32)
+            # if colors are > 1, normalize them to [0,1]
+            if np_colors.max() > 1.0:
+                np_colors = np_colors / 255.0
+        else:
+            pc = o3d.t.io.read_point_cloud(file_path)
+            np_coords = pc.point["positions"].numpy().astype(np.float32)
+            if "colors" in pc.point:
+                cols = pc.point["colors"].numpy().astype(np.float32)
+            else:
+                cols = np.ones((np_coords.shape[0], 3), dtype=np.float32)
+            if "alpha" in pc.point:
+                alpha = pc.point["alpha"].numpy().astype(np.float32)
+            else:
+                alpha = np.ones((np_coords.shape[0], 1), dtype=np.float32)
+            np_colors = np.concatenate([cols, alpha], axis=1)
+            if np_colors.max() > 1.0:
+                np_colors = np_colors / 255.0
+        # combine coords and colors into a single tensor
+        combined = np.concatenate([np_coords, np_colors], axis=1)
+        tensor_pc = torch.from_numpy(combined)
         return (tensor_pc,)
 
     @classmethod
@@ -586,24 +607,36 @@ class SavePointCloud:
         os.makedirs(full_output_folder, exist_ok=True)
         base_name = filename.replace("%batch_num%", "0")
         if save_as == "ply":
-            ply_name  = f"{base_name}_{counter:05}.ply"
-            ply_path  = os.path.join(full_output_folder, ply_name)
-            coords = pointcloud[:, :3].cpu().numpy()
-            colors = pointcloud[:, 3:].cpu().numpy().clip(0,1)
-            with open(ply_path, 'w') as f:
-                f.write("ply\n")
-                f.write("format ascii 1.0\n")
-                f.write(f"element vertex {coords.shape[0]}\n")
-                f.write("property float x\n")
-                f.write("property float y\n")
-                f.write("property float z\n")
-                f.write("property uchar red\n")
-                f.write("property uchar green\n")
-                f.write("property uchar blue\n")
-                f.write("property uchar alpha\n")
-                f.write("end_header\n")
-                for (x,y,z), (r,g,b,a) in zip(coords, colors):
-                    f.write(f"{x} {y} {z} {int(r*255)} {int(g*255)} {int(b*255)} {int(a*255)}\n")
+            ply_name = f"{base_name}_{counter:05}.ply"
+            ply_path = os.path.join(full_output_folder, ply_name)
+            coords = pointcloud[:, :3].cpu().numpy().astype(np.float32)
+            colors = pointcloud[:, 3:].cpu().numpy().clip(0, 1).astype(np.float32)
+
+            if o3d is None:
+                logging.warning("[camera-comfyUI] open3d is not installed. Falling back to manual ASCII PLY writer.")
+                with open(ply_path, 'w') as f:
+                    f.write("ply\n")
+                    f.write("format ascii 1.0\n")
+                    f.write(f"element vertex {coords.shape[0]}\n")
+                    f.write("property float x\n")
+                    f.write("property float y\n")
+                    f.write("property float z\n")
+                    f.write("property float red\n")
+                    f.write("property float green\n")
+                    f.write("property float blue\n")
+                    f.write("property float alpha\n")
+                    f.write("end_header\n")
+                    for (x, y, z), (r, g, b, a) in zip(coords, colors):
+                        f.write(f"{x} {y} {z} {r} {g} {b} {a}\n")
+            else:
+                pc = o3d.t.geometry.PointCloud()
+                pc.point["positions"] = o3d.core.Tensor(coords, o3d.core.float32)
+                pc.point["colors"] = o3d.core.Tensor(colors[:, :3], o3d.core.float32)
+                if colors.shape[1] > 3:
+                    pc.point["alpha"] = o3d.core.Tensor(colors[:, 3:], o3d.core.float32)
+                else:
+                    pc.point["alpha"] = o3d.core.Tensor(np.ones((coords.shape[0], 1), dtype=np.float32), o3d.core.float32)
+                o3d.t.io.write_point_cloud(ply_path, pc)
             file_name = ply_name
         else:
             npy_name = f"{base_name}_{counter:05}.npy"
@@ -640,10 +673,13 @@ class CameraMotionNode:
             "output_width":        ("INT",    {"default":512, "min":8, "max":16384}),
             "output_height":       ("INT",    {"default":512, "min":8, "max":16384}),
             "point_size":          ("INT",    {"default":1,   "min":1}),
+            "widen_mask":         ("INT",    {"default":0, "min":0, "max":64}),
+            "invert_mask":        ("BOOLEAN", {"default": False}),
+            "points_to_mask":     ("BOOLEAN", {"default": False, "tooltip": "Output mask frames of projected points"}),
         }}
 
-    RETURN_TYPES = ("IMAGE",)
-    RETURN_NAMES = ("motion_frames",)
+    RETURN_TYPES = ("IMAGE", "MASK")
+    RETURN_NAMES = ("motion_frames", "mask_frames")
     FUNCTION      = "generate_motion_frames"
     CATEGORY      = "Camera/pointcloud"
 
@@ -656,7 +692,10 @@ class CameraMotionNode:
         output_horizontal_fov: float,
         output_width:          int,
         output_height:         int,
-        point_size:            int = 1
+        point_size:            int = 1,
+        widen_mask:           int = 0,
+        invert_mask:          bool = False,
+        points_to_mask:       bool = False
     ) -> Tuple[torch.Tensor]:
         # validate trajectory shape
         if trajectory.dim() != 3 or trajectory.shape[1:] != (4,4):
@@ -683,9 +722,10 @@ class CameraMotionNode:
         proj_node      = ProjectPointCloud()
         transform_node = TransformPointCloud()
         frames = []
+        masks  = []
         for M in tqdm(full_traj):
             pc_t, = transform_node.transform_pointcloud(pointcloud, M)
-            img, _, _ = proj_node.project_pointcloud(
+            img, mask, _ = proj_node.project_pointcloud(
                 pc_t,
                 output_projection,
                 output_horizontal_fov,
@@ -693,10 +733,19 @@ class CameraMotionNode:
                 output_height,
                 point_size
             )
+            if widen_mask > 0:
+                k = 2 * widen_mask + 1
+                pad = widen_mask
+                mask = F.max_pool2d(mask.float().unsqueeze(0).unsqueeze(0), kernel_size=k, stride=1, padding=pad).squeeze(0).squeeze(0)
+            if invert_mask:
+                mask = 1.0 - mask
+            masks.append(mask)
+            if points_to_mask:
+                img = mask.unsqueeze(-1).repeat(1,1,1,3)
             frames.append(img[0])
 
         # output as (T,H,W,3)
-        return (torch.stack(frames, dim=0),)
+        return (torch.stack(frames, dim=0), torch.stack(masks, dim=0))
 
 class CameraInterpolationNode:
     """
