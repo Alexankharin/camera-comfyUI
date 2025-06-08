@@ -1,49 +1,125 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# 1. Install PyTorch with CUDA 12.8 wheels
-echo "Installing PyTorch, TorchVision, TorchAudio..."
-pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+# ----------------------------------------
+# Functions
+# ----------------------------------------
+install_pytorch() {
+  echo "Installing PyTorch, TorchVision, TorchAudio..."
+  pip3 install -U torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+}
 
-# 2. Update apt repositories and install system dependencies
-echo "Updating apt and installing build-essential, ffmpeg, libsm6, libxext6..."
-sudo apt-get update
-sudo apt-get install -y build-essential ffmpeg libsm6 libxext6
+install_system_deps() {
+  echo "Updating apt and installing system dependencies..."
+  sudo apt-get update
+  sudo apt-get install -y build-essential ffmpeg libsm6 libxext6
+}
 
-# 3. Clone ComfyUI and install its Python requirements
-echo "Cloning ComfyUI..."
-git clone https://github.com/comfyanonymous/ComfyUI.git
-echo "Installing ComfyUI requirements..."
-pip3 install -r ComfyUI/requirements.txt
+clone_and_install_comfyui() {
+  echo "Cloning ComfyUI..."
+  git clone https://github.com/comfyanonymous/ComfyUI.git
+  echo "Installing ComfyUI requirements..."
+  pip3 install -r ComfyUI/requirements.txt
+}
 
-# 4. Enter the custom_nodes folder
-cd ComfyUI/custom_nodes
+install_camera_node() {
+  echo "Cloning camera‑ComfyUI..."
+  git clone https://github.com/Alexankharin/camera-comfyUI.git \
+    ComfyUI/custom_nodes/camera-comfyUI
+  echo "Installing camera‑ComfyUI requirements..."
+  pip3 install -r ComfyUI/custom_nodes/camera-comfyUI/requirements.txt
+}
 
-# 5. camera-comfyUI
-echo "Cloning camera-comfyUI..."
-git clone https://github.com/Alexankharin/camera-comfyUI.git
-echo "Installing camera-comfyUI requirements..."
-pip3 install camera-comfyUI/requirements.txt
+install_image_filters() {
+  echo "Cloning Image‑Filters node..."
+  git clone https://github.com/spacepxl/ComfyUI-Image-Filters.git \
+    ComfyUI/custom_nodes/ComfyUI-Image-Filters
+  echo "Installing Image‑Filters requirements..."
+  pip3 install -r ComfyUI/custom_nodes/ComfyUI-Image-Filters/requirements.txt
+}
 
-# 6. ComfyUI-Flux-Inpainting
-echo "Cloning ComfyUI-Flux-Inpainting..."
-git clone https://github.com/rubi-du/ComfyUI-Flux-Inpainting.git
-echo "Installing ComfyUI-Flux-Inpainting requirements..."
-pip3 install ComfyUI-Flux-Inpainting/requirements.txt
+clone_flux_inpainting() {
+  echo "Cloning ComfyUI‑Flux‑Inpainting..."
+  git clone https://github.com/rubi-du/ComfyUI-Flux-Inpainting.git \
+    ComfyUI/custom_nodes/Flux-Inpainting
+  echo "Renaming Flux‑Inpainting folder..."
+  mv ComfyUI/custom_nodes/Flux-Inpainting \
+     ComfyUI/custom_nodes/inpainting_flux
+}
 
-# 7. ComfyUI-Image-Filters
-echo "Cloning ComfyUI-Image-Filters..."
-git clone https://github.com/spacepxl/ComfyUI-Image-Filters.git
-echo "Installing ComfyUI-Image-Filters requirements..."
-pip3 install ComfyUI-Image-Filters/requirements.txt
+install_hf_hub() {
+  echo "Installing huggingface_hub..."
+  pip3 install huggingface_hub
+}
 
-# 8. Tidy up Flux Inpainting folder name
-echo "Renaming Flux Inpainting folder..."
-cd ..
-mv custom_nodes/ComfyUI-Flux-Inpainting-main custom_nodes/inpainting_flux
+download_vae_models() {
+  echo "Downloading WAN‑VACE models via wget..."
+  mkdir -p models/diffusion_models models/text_encoders models/vae
 
-# 9. Install Hugging Face Hub Python package
-echo "Installing huggingface_hub..."
-pip3 install huggingface_hub
+  wget -O models/vae/wan_2.1_vae.safetensors \
+    "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors?download=true"
 
-echo "All done! 🎉"
+  wget -O models/text_encoders/umt5_xxl_fp16.safetensors \
+    "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/text_encoders/umt5_xxl_fp16.safetensors?download=true"
+
+  wget -O models/diffusion_models/wan2.1_vace_1.3B_fp16.safetensors \
+    "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/diffusion_models/wan2.1_vace_1.3B_fp16.safetensors?download=true"
+}
+
+login_hf_hub() {
+  echo "Logging in to Hugging Face Hub..."
+  huggingface-cli login
+}
+
+# ----------------------------------------
+# Main CLI
+# ----------------------------------------
+# default to "install" if no arg given
+MODE="${1:-install}"
+
+case "$MODE" in
+  modules)
+    install_pytorch
+    install_system_deps
+    clone_and_install_comfyui
+    install_camera_node
+    install_image_filters
+    install_hf_hub
+    ;;
+
+  flux)
+    clone_flux_inpainting
+    ;;
+
+  vae)
+    download_vae_models
+    ;;
+
+  install)
+    install_pytorch
+    install_system_deps
+    clone_and_install_comfyui
+    install_camera_node
+    clone_flux_inpainting
+    install_image_filters
+    install_hf_hub
+    ;;
+
+  all)
+    install_pytorch
+    install_system_deps
+    clone_and_install_comfyui
+    install_camera_node
+    clone_flux_inpainting
+    install_image_filters
+    install_hf_hub
+    download_vae_models
+    login_hf_hub
+    echo "All done! 🎉"
+    ;;
+
+  *)
+    echo "Usage: $0 {install|modules|flux|vae|all}"
+    exit 1
+    ;;
+esac
