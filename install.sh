@@ -54,7 +54,6 @@ install_hf_hub() {
 
 download_vae_models() {
   echo "Downloading WAN‑VACE models via wget..."
-<<<<<<< HEAD
   wget -O models/vae/wan_2.1_vae.safetensors \
     "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors?download=true"
 
@@ -63,18 +62,6 @@ download_vae_models() {
 
   wget -O models/diffusion_models/wan2.1_vace_1.3B_fp16.safetensors \
     "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/blob/main/split_files/diffusion_models/wan2.1_vace_14B_fp16.safetensors?download=true"
-=======
-  mkdir -p models/diffusion_models models/text_encoders models/vae
-
-  wget -O models/vae/wan_2.1_vae.safetensors \
-    "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors?download=true"
-
-  wget -O models/text_encoders/umt5_xxl_fp16.safetensors \
-    "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/text_encoders/umt5_xxl_fp16.safetensors?download=true"
-
-  wget -O models/diffusion_models/wan2.1_vace_1.3B_fp16.safetensors \
-    "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/diffusion_models/wan2.1_vace_1.3B_fp16.safetensors?download=true"
->>>>>>> d604ec8646f778a5ef340034855b34e24ae91fd7
 }
 
 login_hf_hub() {
