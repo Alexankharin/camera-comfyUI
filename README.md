@@ -110,7 +110,7 @@ A collection of ComfyUI custom nodes to handle diverse camera projections (pinho
 | `ZDepthToRayDepthNode`    | Converts Z-depth (output of metric-depth-anything) to ray depth to compensate lens curvature.                        |
 | `TransformPointCloud`     | Applies 4×4 rotation matrix to point cloud                                    |
 | `ProjectPointCloud`       | Z-buffer–based projection of point cloud into image + mask.                   |
-| `CameraMotionNode`        | Generates image sequences by moving camera along a trajectory.                |
+| `CameraMotionNode`        | Generates image and mask sequences along a camera trajectory with optional mask dilation/inversion. |
 | `CameraInterpolationNode` | Builds a trajectory tensor from two poses.                                    |
 | `CameraTrajectoryNode`    | Interactive Open3D GUI for recording camera waypoints.                        |
 | `PointCloudCleaner`       | Removes isolated points via voxel filtering.                                  |
@@ -201,6 +201,12 @@ Take a wide-angle (fisheye or equirectangular) high-resolution (e.g., 4096×4096
 
 Interactive Open3D-based GUI for walking and setting camera trajectory inside pointcloud.
 
+### 11. `wan-vace_ref_to_video.json`
+
+Integrate the [wan2.1-vace] video generation model to inpaint empty or newly revealed regions during camera movement or view synthesis. This workflow demonstrates how to use the camera-comfyUI nodes to generate camera trajectories and masks, then fill missing areas with the video inpainting model for smooth, high-quality results.
+
+<img src="demo_images/wan-wace.camera.gif" alt="wan2.1-vace Camera Inpainting Demo" width="80%" />
+
 ---
 
 ## Contributing
@@ -217,4 +223,4 @@ Contributions welcome! Please open issues or PRs to add features, improve docs, 
 * [x] Add more examples and documentation for each node.
 * [x] Add pointcloud union
 * [ ] Fix imports for renamed folders (e.g., inpainting_flux)
-* [ ] Integrate camera movement pipeline with video models (e.g., wan2.1) for smooth, high-quality inpainting along camera trajectories.
+* [x] Integrate camera movement pipeline with video models (e.g., wan2.1) for smooth, high-quality inpainting along camera trajectories.
