@@ -205,7 +205,7 @@ Interactive Open3D-based GUI for walking and setting camera trajectory inside po
 
 Integrate the [wan2.1-vace] video generation model to inpaint empty or newly revealed regions during camera movement or view synthesis. This workflow demonstrates how to use the camera-comfyUI nodes to generate camera trajectories and masks, then fill missing areas with the video inpainting model for smooth, high-quality results.
 
-<img src="demo_images/wan-wace.camera.gif" alt="wan2.1-vace Camera Inpainting Demo" width="80%" />
+<img src="demo_images/wan-vace-camera.gif" alt="wan2.1-vace Camera Inpainting Demo" width="80%" />
 
 ---
 
