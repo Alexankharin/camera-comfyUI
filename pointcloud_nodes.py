@@ -167,7 +167,7 @@ class DepthToPointCloud:
     RETURN_TYPES = ("TENSOR",)
     RETURN_NAMES = ("pointcloud",)
     FUNCTION = "depth_to_pointcloud"
-    CATEGORY = "Camera/pointcloud"
+    CATEGORY = "Camera/PointCloud"
 
     def depth_to_pointcloud(
         self,
@@ -273,7 +273,7 @@ class TransformPointCloud:
     RETURN_TYPES = ("TENSOR",)
     RETURN_NAMES = ("transformed pointcloud",)
     FUNCTION = "transform_pointcloud"
-    CATEGORY = "Camera/pointcloud"
+    CATEGORY = "Camera/PointCloud"
     
     def transform_pointcloud(
         self,
@@ -321,7 +321,7 @@ class ProjectPointCloud:
     RETURN_TYPES = ("IMAGE", "MASK", "TENSOR")
     RETURN_NAMES = ("image", "mask", "depth")
     FUNCTION = "project_pointcloud"
-    CATEGORY = "Camera/pointcloud"
+    CATEGORY = "Camera/PointCloud"
 
     def project_pointcloud(
         self,
@@ -456,7 +456,7 @@ class PointCloudUnion:
     RETURN_TYPES = ("TENSOR",)
     RETURN_NAMES =("merged pointcloud",) 
     FUNCTION = "union_pointclouds"
-    CATEGORY = "Camera/pointcloud"
+    CATEGORY = "Camera/PointCloud"
 
     def union_pointclouds(
         self,
@@ -492,7 +492,7 @@ class LoadPointCloud:
             }
         }
 
-    CATEGORY = "Camera/pointcloud"
+    CATEGORY = "Camera/PointCloud"
     RETURN_TYPES = ("TENSOR",)
     RETURN_NAMES = ("loaded pointcloud",)
     FUNCTION = "load_pointcloud"
@@ -590,7 +590,7 @@ class SavePointCloud:
     RETURN_TYPES = ()
     FUNCTION     = "save_pointcloud"
     OUTPUT_NODE  = True
-    CATEGORY     = "Camera/pointcloud"
+    CATEGORY     = "Camera/PointCloud"
     DESCRIPTION  = "Saves the input point cloud to your ComfyUI output directory as .ply or .npy."
 
     def save_pointcloud(self, pointcloud: torch.Tensor, filename_prefix: str, save_as: str = "ply"):
@@ -681,7 +681,7 @@ class CameraMotionNode:
     RETURN_TYPES = ("IMAGE", "MASK")
     RETURN_NAMES = ("motion_frames", "mask_frames")
     FUNCTION      = "generate_motion_frames"
-    CATEGORY      = "Camera/pointcloud"
+    CATEGORY      = "Camera/Trajectory"
 
     def generate_motion_frames(
         self,
@@ -764,7 +764,7 @@ class CameraInterpolationNode:
     RETURN_TYPES = ("TENSOR",)
     RETURN_NAMES = ("trajectory",)
     FUNCTION = "interpolate"
-    CATEGORY = "Camera/pointcloud"
+    CATEGORY = "Camera/Trajectory"
 
     def interpolate(
         self,
@@ -799,7 +799,7 @@ class CameraTrajectoryNode:
     RETURN_TYPES = ("TENSOR",)
     RETURN_NAMES = ("trajectory",)
     FUNCTION = "build_trajectory"
-    CATEGORY = "Camera/pointcloud"
+    CATEGORY = "Camera/Trajectory"
 
     def build_trajectory(
         self,
@@ -939,7 +939,7 @@ class PointCloudCleaner:
     RETURN_TYPES = ("TENSOR",)
     RETURN_NAMES = ("cleaned_pointcloud",)
     FUNCTION = "clean_pointcloud"
-    CATEGORY = "Camera/pointcloud"
+    CATEGORY = "Camera/PointCloud"
 
     def clean_pointcloud(
         self,
@@ -1015,7 +1015,7 @@ class ProjectAndClean:
     RETURN_TYPES = ("TENSOR",)
     RETURN_NAMES = ("cleaned_pointcloud",)
     FUNCTION = "project_and_clean"
-    CATEGORY = "Camera/pointcloud"
+    CATEGORY = "Camera/PointCloud"
 
     def project_and_clean(
         self,
@@ -1129,7 +1129,7 @@ class SaveTrajectory:
     RETURN_TYPES = ()
     FUNCTION = "save_trajectory"
     OUTPUT_NODE = True
-    CATEGORY = "Camera/pointcloud"
+    CATEGORY = "Camera/Trajectory"
     DESCRIPTION = "Saves the input trajectory tensor (N,4,4) to your ComfyUI output directory as .npy."
 
     def save_trajectory(self, trajectory: torch.Tensor, filename_prefix: str):
@@ -1179,7 +1179,7 @@ class LoadTrajectory:
             }
         }
 
-    CATEGORY = "Camera/pointcloud"
+    CATEGORY = "Camera/Trajectory"
     RETURN_TYPES = ("TENSOR",)
     RETURN_NAMES = ("loaded_trajectory",)
     FUNCTION = "load_trajectory"

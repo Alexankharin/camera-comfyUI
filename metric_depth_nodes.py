@@ -41,7 +41,7 @@ class DepthEstimatorNode:
     RETURN_TYPES = ("TENSOR",)
     RETURN_NAMES = ("depth tensor",)
     FUNCTION = "estimate_depth"
-    CATEGORY = "Camera/depth"
+    CATEGORY = "Camera/Depth"
 
     def estimate_depth(
         self,
@@ -110,7 +110,7 @@ class DepthToImageNode:
     RETURN_TYPES = ("IMAGE",)
     RETURN_NAMES = ("depth image",)
     FUNCTION = "depth_to_image"
-    CATEGORY = "Camera/depth"
+    CATEGORY = "Camera/Depth"
 
     def depth_to_image(
         self,
@@ -158,7 +158,7 @@ class ZDepthToRayDepthNode:
     RETURN_TYPES = ("TENSOR",)
     RETURN_NAMES = ("ray depth",)
     FUNCTION = "depth_to_ray_depth"
-    CATEGORY = "Camera/depth"
+    CATEGORY = "Camera/Depth"
 
     def depth_to_ray_depth(
         self,
@@ -229,7 +229,7 @@ class CombineDepthsNode:
     RETURN_TYPES = ("TENSOR","MASK")
     RETURN_NAMES = ("combined_depth","combined_mask")
     FUNCTION = "combine_depths"
-    CATEGORY = "Camera/depth"
+    CATEGORY = "Camera/Depth"
 
     def combine_depths(
         self,
@@ -358,7 +358,7 @@ class DepthRenormalizer:
     RETURN_TYPES = ("TENSOR",)
     RETURN_NAMES = ("depth tensor",)
     FUNCTION = "renormalize_depth"
-    CATEGORY = "Camera/depth"
+    CATEGORY = "Camera/Depth"
 
     def renormalize_depth(
         self,

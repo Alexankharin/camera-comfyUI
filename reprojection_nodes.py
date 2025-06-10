@@ -148,7 +148,7 @@ class ReprojectImage:
     RETURN_TYPES: Tuple[str, str] = ("IMAGE", "MASK")
     RETURN_NAMES = ("reprojected image", "reprojected mask")
     FUNCTION: str = "reproject_image"
-    CATEGORY: str = "Camera/reproject"
+    CATEGORY: str = "Camera/Reprojection"
 
     def reproject_image(
         self,
@@ -303,7 +303,7 @@ class TransformToMatrix:
     RETURN_TYPES: Tuple[str] = ("MAT_4X4",)
     RETURN_NAMES = ("transformation matrix",)
     FUNCTION: str = "generate_matrix"
-    CATEGORY: str = "Camera/reproject"
+    CATEGORY: str = "Camera/Matrix"
 
     def generate_matrix(
         self,
@@ -392,7 +392,7 @@ class TransformToMatrixManual:
     RETURN_TYPES: Tuple[str] = ("MAT_4X4",)
     RETURN_NAMES = ("transformation matrix",)
     FUNCTION: str = "generate_matrix"
-    CATEGORY: str = "Camera/reproject"
+    CATEGORY: str = "Camera/Matrix"
 
     def generate_matrix(
         self,
@@ -444,7 +444,7 @@ class ReprojectDepth:
     RETURN_TYPES: Tuple[str, str] = ("TENSOR", "MASK")
     RETURN_NAMES = ("reprojected_depth", "reprojected_mask")
     FUNCTION: str = "reproject_depth"
-    CATEGORY: str = "Camera/reproject"
+    CATEGORY: str = "Camera/Reprojection"
 
     def reproject_depth(
         self,
