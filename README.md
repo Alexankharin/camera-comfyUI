@@ -80,18 +80,25 @@ A collection of ComfyUI custom nodes to handle diverse camera projections (pinho
 * ### Reprojection Nodes
 
   * `ReprojectImage`, `ReprojectDepth`, `OutpaintAnyProjection`
+
+* ### Matrix Nodes
+
   * `TransformToMatrix`, `TransformToMatrixManual`
 
 * ### Depth Nodes
 
   * `DepthEstimatorNode`, `DepthToImageNode`, `ZDepthToRayDepthNode`
-  * `CombineDepthsNode`, `DepthRenormalizer`
+  * `CombineDepthsNode`, `DepthRenormalizer`, `FisheyeDepthEstimator`
 
 * ### Point Cloud Nodes
 
-  * `DepthToPointCloud`, `TransformPointCloud`, `ProjectPointCloud`
-  * `PointCloudUnion`, `PointCloudCleaner`, `LoadPointCloud`, `SavePointCloud`
+  * `DepthToPointCloud`, `TransformPointCloud`, `ProjectPointCloud`, `PointCloudUnion`
+  * `PointCloudCleaner`, `LoadPointCloud`, `SavePointCloud`, `ProjectAndClean`
+
+* ### Trajectory Nodes
+
   * `CameraMotionNode`, `CameraInterpolationNode`, `CameraTrajectoryNode`
+  * `SaveTrajectory`, `LoadTrajectory`, `PointcloudTrajectoryEnricher`
 
 ---
 
