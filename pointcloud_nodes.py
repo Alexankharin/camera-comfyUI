@@ -113,7 +113,7 @@ def XYZ_to_equirect(X: torch.Tensor, Y: torch.Tensor, Z: torch.Tensor, fov: floa
     Convert XYZ coordinates to normalized UV and depth using equirectangular projection.
     """
     # full 360°×180°  
-    fov_rad = math.radians(fov)
+    fov_rad = math.radians(fov) / 2
     depth = torch.sqrt(X**2 + Y**2 + Z**2)
     lon   = torch.atan2(X, Z)            # –π → +π
     lat   = torch.asin(Y / depth)        # –π/2 → +π/2
