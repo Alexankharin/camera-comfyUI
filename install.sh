@@ -7,6 +7,8 @@ set -euo pipefail
 install_pytorch() {
   echo "Installing PyTorch, TorchVision, TorchAudio..."
   pip3 install -U torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+  pip3 install bitsandbytes
+  pip3 install accelerate
 }
 
 install_system_deps() {
@@ -54,16 +56,14 @@ install_hf_hub() {
 
 download_vae_models() {
   echo "Downloading WAN‑VACE models via wget..."
-  mkdir -p models/diffusion_models models/text_encoders models/vae
-
-  wget -O models/vae/wan_2.1_vae.safetensors \
+  wget -O ComfyUI/models/vae/wan_2.1_vae.safetensors \
     "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors?download=true"
 
-  wget -O models/text_encoders/umt5_xxl_fp16.safetensors \
+  wget -O ComfyUI/models/text_encoders/umt5_xxl_fp16.safetensors \
     "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/text_encoders/umt5_xxl_fp16.safetensors?download=true"
 
-  wget -O models/diffusion_models/wan2.1_vace_1.3B_fp16.safetensors \
-    "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/diffusion_models/wan2.1_vace_1.3B_fp16.safetensors?download=true"
+  wget -O ComfyUI/models/diffusion_models/wan2.1_vace_14B_fp16.safetensors \
+    "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/diffusion_models/wan2.1_vace_14B_fp16.safetensors"
 }
 
 login_hf_hub() {

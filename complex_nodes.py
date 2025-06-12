@@ -64,7 +64,7 @@ class FisheyeDepthEstimator:
     RETURN_TYPES = ("TENSOR","MASK")
     RETURN_NAMES = ("depthmap","mask")
     FUNCTION = "estimate_fisheye_depth"
-    CATEGORY = "Camera/depth"
+    CATEGORY = "Camera/Depth"
 
     def estimate_fisheye_depth(
         self,
@@ -241,7 +241,7 @@ class PointcloudTrajectoryEnricher:
     RETURN_TYPES = ("TENSOR","IMAGE","TENSOR")
     RETURN_NAMES = ("enriched_pointcloud","debug_image","debug_depth")
     FUNCTION = "enrich_trajectory"
-    CATEGORY = "Camera/pointcloud"
+    CATEGORY = "Camera/Trajectory"
 
     def enrich_trajectory(
         self,
