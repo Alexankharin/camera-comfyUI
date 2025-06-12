@@ -216,6 +216,37 @@ Integrate the [wan2.1-vace] video generation model to inpaint empty or newly rev
 
 ---
 
+## Trajectory Concept
+
+A **trajectory** in camera-comfyUI is a sequence of camera poses, each represented as a 4×4 transformation matrix. This set of matrices defines the path and orientation of the camera through 3D space, enabling smooth and complex camera movements for view synthesis, point cloud rendering, and video generation.
+
+### Creating Trajectories
+
+There are two main ways to create a trajectory:
+
+- **Camera Matrices Interpolation:**  
+  Define two or more camera poses (as matrices), and interpolate between them to generate a smooth path. The `CameraInterpolationNode` automates this process, producing a trajectory tensor for use in camera motion nodes.
+
+- **Walking in Open3D Environment:**  
+  Use the interactive Open3D GUI (`CameraTrajectoryNode`) to "walk" through the point cloud. As you move the camera, waypoints (poses) are recorded, forming a trajectory that can be exported and reused.
+
+### Using Trajectories
+
+The `CameraMotionNode` takes a trajectory (set of matrices) and interpolates camera positions and orientations along it, producing smooth camera movements for rendering sequences or videos.
+
+---
+
+## Point Cloud Formats
+
+Point clouds can be saved and loaded in two formats:
+
+- **.npy**: Numpy array format (fast, preserves all tensor data, recommended for internal pipelines).
+- **.ply**: Polygon File Format (widely supported, viewable in external 3D tools).
+
+Use the `SavePointCloud` and `LoadPointCloud` nodes to handle I/O operations in either format.
+
+---
+
 ## Contributing
 
 Contributions welcome! Please open issues or PRs to add features, improve docs, or refine workflows.
@@ -229,5 +260,5 @@ Contributions welcome! Please open issues or PRs to add features, improve docs, 
 * [x] Implement easier and more flexible camera control - more complex camera movements with more than 2 points.
 * [x] Add more examples and documentation for each node.
 * [x] Add pointcloud union
-* [ ] Fix imports for renamed folders (e.g., inpainting_flux)
+* [x] Fix imports for renamed folders (e.g., inpainting_flux)
 * [x] Integrate camera movement pipeline with video models (e.g., wan2.1) for smooth, high-quality inpainting along camera trajectories.
