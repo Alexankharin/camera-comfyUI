@@ -393,6 +393,7 @@ class ProjectPointCloud:
         img4 = flat.view(output_height, output_width, 4)
         rgb   = img4[..., :3].clamp(0, 255)
         alpha = (img4[..., 3] > 0).float()
+        mask_init= (img4[..., 3] > 0)  # initial mask
         rgb  *= alpha.unsqueeze(-1)
         depth_img = z_front.view(output_height, output_width)
         rgb_HR = rgb
@@ -406,7 +407,6 @@ class ProjectPointCloud:
             idxbuf.fill_(-1)
             idxbuf.scatter_reduce_(0, pix, order_m, reduce='amax', include_self=True)
             win_back = idxbuf[pix] >= 0
-
             flat.fill_(0)
             flat[pix[win_back]] = colors[win_back]
             back4 = flat.view(output_height, output_width, 4)
@@ -430,8 +430,29 @@ class ProjectPointCloud:
                 # merge only at hole locations
                 rgb[hole] = rgb_med[hole]
                 # alpha already set to 1.0 for holes
+            # 8 apply median blur to mask if point_size > 1 and to initial image  
+            mask_t = alpha.unsqueeze(0).unsqueeze(0)  # [1,1,H,W]
+            pad    = point_size // 2
+            ksize  = (point_size, point_size)
 
-        # 8) Pack and return with original script shapes
+            # b) grow (dilate) mask by max‑pool
+            mask_grow = F.max_pool2d(mask_t, kernel_size=ksize, stride=1, padding=pad)
+
+            # c) shrink (erode) by inverting, max‑pool, then inverting back
+            mask_shrink = 1.0 - F.max_pool2d(1.0 - mask_grow, kernel_size=ksize, stride=1, padding=pad)
+
+            # d) back to [H,W] and use as our new alpha
+            alpha = mask_shrink.squeeze(0).squeeze(0)
+            print(1)
+            # e) median‑filter the *whole* RGB image
+            #    prep for kornia: [B,C,H,W]
+            rgb_t_full   = rgb.permute(2,0,1).unsqueeze(0)       # [1,3,H,W]
+            rgb_med_full = median_blur(rgb_t_full, ksize)        # [1,3,H,W]
+            rgb_med_full = rgb_med_full.squeeze(0).permute(1,2,0)  # [H,W,3]
+
+            # g) refill *only* the original holes with the median result
+            rgb[~mask_init] = rgb_med_full[~mask_init]
+        # 9) Pack and return with original script shapes
         img       = rgb.unsqueeze(0)  # [1,H,W,3]
         mask_out  = alpha             # [H,W]
         depth4    = depth_img.unsqueeze(0).unsqueeze(-1)  # [1,H,W,1]
