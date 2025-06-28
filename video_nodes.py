@@ -11,17 +11,25 @@ from .pointcloud_nodes import DepthToPointCloud, TransformPointCloud, ProjectPoi
 import folder_paths
 
 # Ensure video_depth_anything is on path
-video_depth_path = os.path.join("/root/Video-Depth-Anything", "metric_depth")
+_here = os.path.dirname(os.path.abspath(__file__))
+
+# climb up 3 levels: camera-comfyUI → custom_nodes → ComfyUI
+COMFYUI_ROOT = os.path.abspath(os.path.join(_here, os.pardir, os.pardir, os.pardir))
+
+# point at metric_depth inside the Video-Depth-Anything clone at the ComfyUI root
+video_depth_path = os.path.join(COMFYUI_ROOT, "Video-Depth-Anything", "metric_depth")
+
+# insert at front so it always wins
 if video_depth_path not in sys.path:
-    sys.path.append(video_depth_path)
+    sys.path.insert(0, video_depth_path)
+
 try:
     from video_depth_anything.video_depth import VideoDepthAnything
-    print("video_depth_anything module loaded successfully.")
-except ImportError:
-    VideoDepthAnything = None
-    print("Warning: video_depth_anything module not found. Ensure it is installed correctly.")
-    print("error: ", sys.exc_info()[1])
-
+    print("✅ video_depth_anything module loaded successfully.")
+except ImportError as e:
+    raise ImportError(
+        f"❌ Could not load video_depth_anything from {video_depth_path!r}: {e}"
+    )
 
 class VideoCameraMotionSequence:
     """
