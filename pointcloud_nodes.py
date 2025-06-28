@@ -813,7 +813,7 @@ class CameraTrajectoryNode:
             "pointcloud":    ("TENSOR",),
         },
         "optional": {
-            "initial_matrix": ("MAT_4X4"),
+            "initial_matrix": ("MAT_4X4",),
             }
         }
 
