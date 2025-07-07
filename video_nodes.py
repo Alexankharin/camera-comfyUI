@@ -48,6 +48,8 @@ class VideoCameraMotionSequence:
                 "depth_seq": ("TENSOR", {"shape_hint": [None, None, None]}),
                 # Camera trajectory waypoints: Tensor [K, 4, 4]
                 "trajectory": ("TENSOR", {"shape_hint": [None, 4, 4]}),
+                # Optional mask sequence: Tensor [T, H, W] or [T, H, W, 1]
+                "mask_seq": ("MASK", {"shape_hint": [None, None, None], "optional": True}),
                 # Input projection parameters
                 "input_projection": (Projection.PROJECTIONS, {}),
                 "input_horizontal_fov": ("FLOAT", {"default": 90.0}),
@@ -86,6 +88,7 @@ class VideoCameraMotionSequence:
         point_size: int,
         voxel_size: float,
         min_points_per_voxel: int,
+        mask_seq: torch.Tensor = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         # frames: [T, H, W, 3]
         # depth_seq: [T, H, W] or [T, H, W, 1]
@@ -109,9 +112,21 @@ class VideoCameraMotionSequence:
         out_depths = []
 
         # Add tqdm progress bar for the sequence
-        for frame, depth, pose in tqdm(zip(frames, depth_seq, interp_traj), total=T, desc="Processing video frames"):
+        # If mask_seq is a single mask [H, W] or [H, W, 1], repeat it for all frames
+        if mask_seq is not None:
+            if mask_seq.dim() == 2 or (mask_seq.dim() == 3 and mask_seq.shape[0] == 1):
+                mask_seq = mask_seq.unsqueeze(0) if mask_seq.dim() == 2 else mask_seq
+                mask_seq = mask_seq.repeat(T, 1, 1, 1) if mask_seq.dim() == 4 else mask_seq.repeat(T, 1, 1)
+
+        for i, (frame, depth, pose) in enumerate(tqdm(zip(frames, depth_seq, interp_traj), total=T, desc="Processing video frames")):
             if depth.dim() == 3 and depth.shape[-1] == 1:
                 depth = depth.squeeze(-1)
+                # Use mask if provided
+                mask = None
+            if mask_seq is not None:
+                mask = mask_seq[i]
+            if mask.dim() == 3 and mask.shape[-1] == 1:
+                mask = mask.squeeze(-1)
             # to pointcloud
             pc, = DepthToPointCloud().depth_to_pointcloud(
                 image=frame.permute(2, 0, 1),
@@ -120,7 +135,7 @@ class VideoCameraMotionSequence:
                 depth_scale=depth_scale,
                 invert_depth=invert_depth,
                 depthmap=depth,
-                mask=None,
+                mask=mask,
             )
             # optional cleaning
             if min_points_per_voxel > 1:
