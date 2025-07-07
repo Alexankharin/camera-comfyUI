@@ -428,7 +428,7 @@ class ProjectPointCloud:
 
         # 7) Pack outputs
         img       = rgb.unsqueeze(0)                     # [1,H,W,3]
-        mask_out  = mask                                 # [H,W]
+        mask_out  = mask.float()                          # [H,W]
         depth4    = depth_img.unsqueeze(0).unsqueeze(-1) # [1,H,W,1]
         if return_inverse_depth:
             depth4 = 1.0 / depth4.clamp(min=1e-6)
