@@ -14,7 +14,7 @@ import folder_paths
 _here = os.path.dirname(os.path.abspath(__file__))
 
 # climb up 3 levels: camera-comfyUI → custom_nodes → ComfyUI
-COMFYUI_ROOT = os.path.abspath(os.path.join(_here, os.pardir, os.pardir, os.pardir))
+COMFYUI_ROOT = os.path.abspath(os.path.join(_here, os.pardir, os.pardir))
 
 # point at metric_depth inside the Video-Depth-Anything clone at the ComfyUI root
 video_depth_path = os.path.join(COMFYUI_ROOT, "Video-Depth-Anything", "metric_depth")

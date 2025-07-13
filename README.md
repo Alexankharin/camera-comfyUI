@@ -1,6 +1,7 @@
 # camera-comfyUI
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/Alexankharin/camera-comfyUI)
 ![ComfyUI Custom Nodes](demo_images/Camera_interpolation_pointcloud.gif)
+![Camera Movement Demo](demo_images/camera_movement.gif)
 
 > Custom ComfyUI nodes for advanced reprojections, point cloud processing, and camera-driven workflows.
 
@@ -115,12 +116,20 @@ A collection of ComfyUI custom nodes to handle diverse camera projections (pinho
 | `DepthToPointCloud`       | Converts Depth and image to → 3D point cloud tensor (N×7).                    |
 | `DepthToImageNode`        | Converts depth to image (N×3) using a color map.                              |
 | `ZDepthToRayDepthNode`    | Converts Z-depth (output of metric-depth-anything) to ray depth to compensate lens curvature.                        |
-| `TransformPointCloud`     | Applies 4×4 rotation matrix to point cloud                                    |
+| `TransformPointCloud`     | Applies 4×4 rotation matrix to point cloud.                                   |
 | `ProjectPointCloud`       | Z-buffer–based projection of point cloud into image + mask.                   |
+| `PointCloudCleaner`       | Removes isolated points via voxel filtering.                                  |
+| `PointCloudUnion`         | Combines multiple point clouds into one.                                      |
+| `LoadPointCloud`          | Loads a point cloud from `.npy` or `.ply` format.                             |
+| `SavePointCloud`          | Saves a point cloud to `.npy` or `.ply` format.                               |
 | `CameraMotionNode`        | Generates image and mask sequences along a camera trajectory with optional mask dilation/inversion. |
 | `CameraInterpolationNode` | Builds a trajectory tensor from two poses.                                    |
 | `CameraTrajectoryNode`    | Interactive Open3D GUI for recording camera waypoints.                        |
-| `PointCloudCleaner`       | Removes isolated points via voxel filtering.                                  |
+| `SaveTrajectory`          | Saves a trajectory tensor to a file.                                          |
+| `LoadTrajectory`          | Loads a trajectory tensor from a file.                                        |
+| `VideoCameraMotionSequence` | Processes video frames and depth maps along a camera trajectory, generating reprojected outputs. |
+| `DepthFramesToVideo`      | Converts a sequence of depth maps into video frame tensors for saving.        |
+| `VideoMetricDepthEstimate` | Estimates metric depth for a sequence of frames using VideoDepthAnything.    |
 
 ---
 
@@ -140,6 +149,7 @@ A set of JSON workflows illustrating typical use cases. Each workflow lives in `
 | **pointcloud\_inpaint.json**           | Inpaint + backproject to 3D for dynamic camera motion videos   |
 | **Pointcloud\_walker.json**            | GUI‐based camera control via Open3D                            |
 | **sbs180\_workflow.json**              | Generate stereo (side-by-side) wide-angle/fisheye/equirectangular stereo pairs from a high-res input |
+| **video_camera.json**                  | Camera trajectory movement workflow using `wan-vace` for video inpainting. |
 
 ---
 
@@ -208,11 +218,13 @@ Take a wide-angle (fisheye or equirectangular) high-resolution (e.g., 4096×4096
 
 Interactive Open3D-based GUI for walking and setting camera trajectory inside pointcloud.
 
-### 11. `wan-vace_ref_to_video.json`
+### 11. `video_camera.json`
 
-Integrate the [wan2.1-vace] video generation model to inpaint empty or newly revealed regions during camera movement or view synthesis. This workflow demonstrates how to use the camera-comfyUI nodes to generate camera trajectories and masks, then fill missing areas with the video inpainting model for smooth, high-quality results.
+This workflow demonstrates camera trajectory movement using the `wan-vace` video inpainting model. It generates smooth camera movements along a trajectory while filling missing regions with high-quality inpainting.
 
-<img src="demo_images/wan-vace-camera.gif" alt="wan2.1-vace Camera Inpainting Demo" width="80%" />
+<div style="display:flex; gap:10px;">
+  <video src="demo_images/Demo_camera_movement.mp4" controls width="80%"></video>
+</div>
 
 ---
 
