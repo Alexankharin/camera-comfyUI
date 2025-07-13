@@ -22,12 +22,13 @@ video_depth_path = os.path.join(COMFYUI_ROOT, "Video-Depth-Anything", "metric_de
 # insert at front so it always wins
 if video_depth_path not in sys.path:
     sys.path.insert(0, video_depth_path)
-
+NO_VIDEO_DEPTH_ANYTHING= False
 try:
     from video_depth_anything.video_depth import VideoDepthAnything
     print("✅ video_depth_anything module loaded successfully.")
 except ImportError as e:
-    raise ImportError(
+    NO_VIDEO_DEPTH_ANYTHING = True
+    print(
         f"❌ Could not load video_depth_anything from {video_depth_path!r}: {e}"
     )
 
@@ -281,8 +282,11 @@ class VideoMetricDepthEstimate:
         return (torch.from_numpy(metric_depths), float(fps))
 
 # Register nodes
-NODE_CLASS_MAPPINGS = {
-    "VideoCameraMotionSequence": VideoCameraMotionSequence,
-    "VideoMetricDepthEstimate": VideoMetricDepthEstimate,
-    "DepthFramesToVideo": DepthFramesToVideo,
-}
+if NO_VIDEO_DEPTH_ANYTHING:
+    NODE_CLASS_MAPPINGS = {}
+else:
+    NODE_CLASS_MAPPINGS = {
+        "VideoCameraMotionSequence": VideoCameraMotionSequence,
+        "VideoMetricDepthEstimate": VideoMetricDepthEstimate,
+        "DepthFramesToVideo": DepthFramesToVideo,
+    }

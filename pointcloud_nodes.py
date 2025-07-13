@@ -325,7 +325,7 @@ class ProjectPointCloud:
 
     def project_pointcloud(
         self,
-        pointcloud:    torch.Tensor,
+        pointcloud: torch.Tensor,
         output_projection: str,
         output_horizontal_fov: float,
         output_width:  int,
@@ -333,107 +333,142 @@ class ProjectPointCloud:
         point_size:    int = 1,
         return_inverse_depth: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Identical I/O signature as before – the body below adds the two‑layer‑aware
+        hole filling described in the paper *A Fast Layer‑Aware In‑Painter for
+        Projected Point Clouds* (2025).
+        """
         device = pointcloud.device
-        coords = pointcloud[:, :3]
-        # use only RGB channels
-        colors = pointcloud[:, 3:6].float()
+        coords  = pointcloud[:, :3]
+        colors  = pointcloud[:, 3:6].float()
 
-        # 1) Filter points in front of the camera
+        # 1.  Front‑facing points only ------------------------------------------------
         mask_front = coords[:, 2] > 0
-        coords = coords[mask_front]
-        colors = colors[mask_front]
+        coords, colors = coords[mask_front], colors[mask_front]
 
-        # 2) Project to normalized UV + depth
+        # 2.  Camera projection -------------------------------------------------------
         X, Y, Z = coords.unbind(1)
         if output_projection == "PINHOLE":
             u, v, depth = XYZ_to_pinhole(X, Y, Z, output_horizontal_fov)
         elif output_projection == "FISHEYE":
             u, v, depth = XYZ_to_fisheye(X, Y, Z, output_horizontal_fov)
-        else:
+        else:                                  # EQUIRECT
             u, v, depth = XYZ_to_equirect(X, Y, Z, output_horizontal_fov)
 
-        # 3) Rasterize to pixel indices
+        # 3.  Rasterise to pixels -----------------------------------------------------
         W, H = output_width, output_height
-        px = (u * (W - 1) / 2) + (W - 1) / 2
-        py = (v * (H - 1) / 2) + (H - 1) / 2
-        ix = px.round().clamp(0, W - 1).long()
-        iy = py.round().clamp(0, H - 1).long()
+        ix = ((u * 0.5 + 0.5) * (W - 1)).round().clamp(0, W - 1).long()
+        iy = ((v * 0.5 + 0.5) * (H - 1)).round().clamp(0, H - 1).long()
         pix = iy * W + ix
-        M = W * H
+        M   = W * H
 
-        # 4) Keep only valid projections
-        valid = (pix >= 0) & (pix < M)
-        depth = depth[valid]
-        colors = colors[valid]
-        pix = pix[valid]
+        valid  = (pix >= 0) & (pix < M)
+        pix, depth, colors = pix[valid], depth[valid], colors[valid]
 
-        # 5) Nearest z-buffer (front)
+        # 3a.  Per‑pixel statistics ---------------------------------------------------
+        # Nearest z (front)
         z_front = torch.full((M,), float('inf'), device=device)
         z_front.scatter_reduce_(0, pix, depth, reduce='amin', include_self=True)
 
-        # select only the nearest sample per pixel
-        sel_front = depth == z_front[pix]
-        pix_sel = pix[sel_front]
-        col_sel = colors[sel_front]
+        # Count how many samples fell into every pixel
+        ones  = torch.ones_like(depth, dtype=torch.int32)
+        cnt   = torch.zeros(M, dtype=torch.int32, device=device)
+        cnt.scatter_add_(0, pix, ones)
 
-        # pack into image buffer
-        flat_rgb = torch.zeros((M, 3), device=device)
-        flat_rgb[pix_sel] = col_sel.clamp(0, 255)
-        rgb = flat_rgb.view(H, W, 3)
+        # 3b.  Keep only the nearest sample per pixel for colour
+        keep = depth == z_front[pix]
+        pix_front, col_front = pix[keep], colors[keep]
 
-        # create initial depth & mask
-        depth_img = z_front.view(H, W)
-        mask_init = (depth_img < float('inf'))
-        mask = mask_init.clone()
-        depth_inftozero= depth_img.clone()
-        # replace inf with 0
-        depth_inftozero[depth_inftozero == float('inf')] = 0
+        # 4.  Write colour buffer & reshape depth/count --------------------------------
+        rgb  = torch.zeros((M, 3), device=device)
+        rgb[pix_front] = col_front.clamp(0, 255)
 
-        # 6) Hole-filling + small-hole closure
-        mask = mask_init.clone()
+        rgb         = rgb.view(H, W, 3)
+        depth_front = z_front.view(H, W)            # nearest layer
+        count_map   = cnt.view(H, W)                # #layers per pixel (1, 2, …)
+
+        # 5.  Binary masks -------------------------------------------------------------
+        mask_front_ok = depth_front < float('inf')  # front layer exists
+        mask_two      = count_map >= 2              # front + back both present
+
+        # 6.  Locate rear‑only pin holes ----------------------------------------------
+        r   = point_size // 2
+        pad = r
+        k   = 2 * r + 1
+        # k   = 3                     # 3×3 topology kernel
+        # pad = 1
+        # "Is every 3×3 neighbour a two‑layer pixel?"
+        # mask two is 1 where there are more than two layers
+        # expand
+        mask_two   = F.max_pool2d(mask_two.float().unsqueeze(0).unsqueeze(0), k, 1, pad).squeeze(0).squeeze(0)
+        # inv two is 1 where there is one or 0 layers
+        inv_two   = (1-mask_two).float().unsqueeze(0).unsqueeze(0)  # [1,1,H,W]
+        # erode
+        hole_core = (F.max_pool2d(inv_two, k, 1, pad) == 0).squeeze(0).squeeze(0)
+        candidate = (~mask_front_ok) & (count_map == 1) & hole_core  # final query
+
+        # 7.  Average (colour, depth) of neighbouring foreground pixels ---------------
+        depth_t   = depth_front.masked_fill(~mask_front_ok, 0).unsqueeze(0).unsqueeze(0)
+        color_t   = rgb.permute(2,0,1).unsqueeze(0)                 # [1,3,H,W]
+        mask_t    = mask_front_ok.float().unsqueeze(0).unsqueeze(0) # [1,1,H,W]
+
+        ker      = torch.ones((1,1,k,k), device=device)
+        ker_rgb  = ker.repeat(3,1,1,1)
+
+        sum_d = F.conv2d(depth_t * mask_t, ker, padding=pad)
+        cnt_d = F.conv2d(mask_t, ker, padding=pad).clamp(min=1)
+
+        sum_c = F.conv2d(color_t * mask_t, ker_rgb, padding=pad, groups=3)
+        cnt_c = cnt_d.clone().repeat(1,3,1,1)
+
+        avg_d = (sum_d / cnt_d).squeeze(0).squeeze(0)      # [H,W]
+        avg_c = (sum_c / cnt_c).squeeze(0).permute(1,2,0)  # [H,W,3]
+
+        # 8.  In‑paint the pin holes ---------------------------------------------------
+        rgb[candidate]         = avg_c[candidate]
+        depth_front[candidate] = avg_d[candidate]
+        mask_front_ok[candidate] = True                    # now has a front value
+
+        # 9.  Optional – run your previous “small‑hole closing” (unchanged) -----------
         if point_size > 1:
-            r = point_size // 2
-            k = 2*r + 1
+            r   = point_size // 2
             pad = r
-            # tensors for conv
-            depth_t = depth_inftozero.unsqueeze(0).unsqueeze(0)    # [1,1,H,W]
-            mask_t  = mask.float().unsqueeze(0).unsqueeze(0) # [1,1,H,W]
-            rgb_t   = rgb.permute(2,0,1).unsqueeze(0)        # [1,3,H,W]
-            # define kernel
-            kernel = torch.ones((1,1,k,k), device=device)
+            k   = 2 * r + 1
+            ker = torch.ones((1,1,k,k), device=device)
 
-            # average-based fill
-            sum_d = F.conv2d(depth_t * mask_t, kernel, padding=pad)
-            cnt   = F.conv2d(mask_t, kernel, padding=pad).clamp(min=1.0)
-            kernel_rgb = kernel.repeat(3,1,1,1)
-            sum_c = F.conv2d(rgb_t * mask_t, kernel_rgb, padding=pad, groups=3)
-            avg_d = sum_d / cnt
-            avg_c = sum_c / cnt
-            cnt_map = cnt.squeeze(0).squeeze(0)
+            d_t = depth_front.masked_fill(~mask_front_ok, 0).unsqueeze(0).unsqueeze(0)
+            m_t = mask_front_ok.float().unsqueeze(0).unsqueeze(0)
+            c_t = rgb.permute(2,0,1).unsqueeze(0)
 
-            # morphological closing on initial mask to find small holes
-            mask0_t = mask_init.float().unsqueeze(0).unsqueeze(0)
-            grow    = F.max_pool2d(mask0_t, (k,k), stride=1, padding=pad)
-            shrink  = 1 - F.max_pool2d(1-grow, (k,k), stride=1, padding=pad)
-            closed  = shrink.squeeze(0).squeeze(0) > 0
-            small_holes = closed & ~mask_init
+            sum_d = F.conv2d(d_t * m_t, ker, padding=pad)
+            cnt   = F.conv2d(m_t, ker, padding=pad).clamp(min=1)
+            sum_c = F.conv2d(c_t * m_t, ker.repeat(3,1,1,1),
+                            padding=pad, groups=3)
 
-            # fill only small, fillable holes
-            hole = small_holes & (cnt_map > 0)
-            filled_c = avg_c.squeeze(0).permute(1,2,0)
-            filled_d = avg_d.squeeze(0).squeeze(0)
-            rgb[hole]       = filled_c[hole]
-            depth_img[hole] = filled_d[hole]
-            mask = closed
+            avg_d = (sum_d / cnt).squeeze(0).squeeze(0)
+            avg_c = (sum_c / cnt).squeeze(0).permute(1,2,0)
+            cnt   = cnt.squeeze(0).squeeze(0)
 
-        # 7) Pack outputs
-        img       = rgb.unsqueeze(0)                     # [1,H,W,3]
-        mask_out  = mask.float()                          # [H,W]
-        depth4    = depth_img.unsqueeze(0).unsqueeze(-1) # [1,H,W,1]
+            # morphological closing on mask_front_ok
+            grow   = F.max_pool2d(m_t, k, 1, pad)
+            shrink = 1 - F.max_pool2d(1 - grow, k, 1, pad)
+            closed = shrink.squeeze(0).squeeze(0) > 0
+            small  = closed & ~mask_front_ok & (cnt > 0)
+
+            rgb[small]          = avg_c[small]
+            depth_front[small]  = avg_d[small]
+            mask_front_ok[small] = True
+
+        # 10. Pack outputs ------------------------------------------------------------
+        img   = rgb.unsqueeze(0)                       # [1,H,W,3]
+        mask  = mask_front_ok.float()                  # [H,W]
+        depth = depth_front.unsqueeze(0).unsqueeze(-1) # [1,H,W,1]
+
         if return_inverse_depth:
-            depth4 = 1.0 / depth4.clamp(min=1e-6)
-        depth4 = depth4 * mask_out.unsqueeze(0).unsqueeze(-1)
-        return img, mask_out, depth4
+            depth = 1.0 / depth.clamp(min=1e-6)
+
+        depth = depth * mask.unsqueeze(0).unsqueeze(-1)
+        return img, mask, depth
 
 
 
