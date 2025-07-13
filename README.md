@@ -223,7 +223,7 @@ Interactive Open3D-based GUI for walking and setting camera trajectory inside po
 This workflow demonstrates camera trajectory movement using the `wan-vace` video inpainting model. It generates smooth camera movements along a trajectory while filling missing regions with high-quality inpainting.
 
 <div style="display:flex; gap:10px;">
-  <video src="demo_images/Demo_camera_movement.mp4" controls width="80%"></video>
+  <img src="demo_images/camera_movement.gif" alt="Camera Movement Demo" width="80%" />
 </div>
 
 ---
