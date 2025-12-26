@@ -1,7 +1,11 @@
 import math
 import os
+import sys
+import ssl
+import shutil
 import logging
 import hashlib
+import urllib.request
 from dataclasses import dataclass
 from typing import Dict, Any, Tuple, List, Optional
 
@@ -18,6 +22,26 @@ except ImportError:  # Allow notebook usage outside ComfyUI
             )
 
     folder_paths = _FolderPathsStub()
+
+_SHARP_AVAILABLE = False
+_SHARP_IMPORT_ERROR: Optional[Exception] = None
+_SHARP_DEFAULT_MODEL_URL = None
+_SHARP_DEFAULT_CHECKPOINT_LABEL = "<download default>"
+_SHARP_PREDICTOR_CACHE: Dict[Tuple[str, str], Any] = {}
+try:
+    _sharp_root = os.path.join(os.path.dirname(__file__), "submodules", "ml-sharpt", "src")
+    if os.path.isdir(_sharp_root) and _sharp_root not in sys.path:
+        sys.path.append(_sharp_root)
+
+    from sharp.models import PredictorParams, create_predictor
+    from sharp.cli.predict import predict_image as _sharp_predict_image
+    from sharp.cli.predict import DEFAULT_MODEL_URL as _SHARP_DEFAULT_MODEL_URL
+    from sharp.utils import color_space as _sharp_color_space
+    from sharp.utils.gaussians import convert_rgb_to_spherical_harmonics as _sharp_rgb_to_sh
+
+    _SHARP_AVAILABLE = True
+except Exception as exc:
+    _SHARP_IMPORT_ERROR = exc
 
 
 class Projection:
@@ -489,6 +513,164 @@ def _extract_f_rest(data: Dict[str, np.ndarray]) -> Tuple[np.ndarray, int]:
     return f_rest, sh_order
 
 
+def _ensure_sharp_available() -> None:
+    if not _SHARP_AVAILABLE:
+        raise ModuleNotFoundError(
+            f"ml-sharpt is unavailable. Ensure submodules/ml-sharpt is present and its dependencies are installed. "
+            f"Import error: {_SHARP_IMPORT_ERROR}"
+        )
+
+
+def _horizontal_fov_to_f_px(width: int, horizontal_fov: float) -> float:
+    if horizontal_fov <= 0.0 or horizontal_fov >= 179.0:
+        raise ValueError("horizontal_fov must be between 0 and 179 degrees.")
+    fov_rad = math.radians(horizontal_fov)
+    return (width / 2.0) / math.tan(fov_rad / 2.0)
+
+
+def _tensor_image_to_numpy(image: torch.Tensor) -> np.ndarray:
+    img = image
+    if img.dim() == 4:
+        img = img[0]
+    if img.dim() == 3 and img.shape[-1] not in (3, 4) and img.shape[0] in (1, 3, 4):
+        img = img.permute(1, 2, 0)
+    if img.shape[-1] > 3:
+        img = img[..., :3]
+    img = img.detach().cpu().float()
+    if img.numel() == 0:
+        raise ValueError("Input image is empty.")
+    if img.max().item() <= 1.0:
+        img = img * 255.0
+    img = img.clamp(0.0, 255.0).to(torch.uint8)
+    return img.numpy()
+
+
+def _get_sharp_default_checkpoint_path() -> Optional[str]:
+    if _SHARP_DEFAULT_MODEL_URL is None:
+        return None
+    filename = os.path.basename(_SHARP_DEFAULT_MODEL_URL)
+    cache_dir = os.path.join(torch.hub.get_dir(), "checkpoints")
+    return os.path.join(cache_dir, filename)
+
+def _download_sharp_checkpoint(url: str, destination: str) -> None:
+    os.makedirs(os.path.dirname(destination), exist_ok=True)
+    try:
+        torch.hub.download_url_to_file(url, destination, progress=True)
+        return
+    except Exception:
+        pass
+
+    ctx = ssl._create_unverified_context()
+    try:
+        with urllib.request.urlopen(url, context=ctx) as response, open(destination, "wb") as f:
+            shutil.copyfileobj(response, f)
+    except Exception as exc:
+        if os.path.isfile(destination):
+            try:
+                os.remove(destination)
+            except OSError:
+                pass
+        raise RuntimeError(
+            "Failed to download the SHARP checkpoint. If your environment blocks SSL downloads, "
+            "manually download the .pt file and select it from the input folder."
+        ) from exc
+
+
+def _load_sharp_predictor(
+    checkpoint_path: Optional[str],
+    device: torch.device,
+):
+    key = (checkpoint_path or "default", str(device))
+    cached = _SHARP_PREDICTOR_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    if checkpoint_path:
+        try:
+            state_dict = torch.load(checkpoint_path, weights_only=True)
+        except TypeError:
+            state_dict = torch.load(checkpoint_path)
+    else:
+        if _SHARP_DEFAULT_MODEL_URL is None:
+            raise RuntimeError("Default SHARP checkpoint URL is unavailable.")
+        cached_path = _get_sharp_default_checkpoint_path()
+        if cached_path is None:
+            raise RuntimeError("Default SHARP checkpoint cache location is unavailable.")
+        if not os.path.isfile(cached_path):
+            _download_sharp_checkpoint(_SHARP_DEFAULT_MODEL_URL, cached_path)
+        try:
+            state_dict = torch.load(cached_path, weights_only=True)
+        except TypeError:
+            state_dict = torch.load(cached_path)
+
+    predictor = create_predictor(PredictorParams())
+    predictor.load_state_dict(state_dict)
+    predictor.eval()
+    predictor.to(device)
+    _SHARP_PREDICTOR_CACHE[key] = predictor
+    return predictor
+
+
+def _write_ply_splats(path: str, splats: GaussianSplats) -> None:
+    xyz = splats.xyz.detach().cpu().float().numpy()
+    scale = splats.scale.detach().cpu().float().numpy()
+    rotation = splats.rotation.detach().cpu().float().numpy()
+    opacity = splats.opacity.detach().cpu().float().reshape(-1).numpy()
+    f_dc = splats.f_dc.detach().cpu().float().numpy()
+    f_rest = splats.f_rest.detach().cpu().float().numpy()
+
+    props: List[Tuple[str, np.ndarray]] = [
+        ("x", xyz[:, 0]),
+        ("y", xyz[:, 1]),
+        ("z", xyz[:, 2]),
+        ("f_dc_0", f_dc[:, 0]),
+        ("f_dc_1", f_dc[:, 1]),
+        ("f_dc_2", f_dc[:, 2]),
+        ("opacity", opacity),
+        ("scale_0", scale[:, 0]),
+        ("scale_1", scale[:, 1]),
+        ("scale_2", scale[:, 2]),
+        ("rot_0", rotation[:, 0]),
+        ("rot_1", rotation[:, 1]),
+        ("rot_2", rotation[:, 2]),
+        ("rot_3", rotation[:, 3]),
+    ]
+    if f_rest.size > 0:
+        for i in range(f_rest.shape[1]):
+            props.append((f"f_rest_{i}", f_rest[:, i]))
+
+    dtype = [(name, "<f4") for name, _ in props]
+    data = np.empty(xyz.shape[0], dtype=dtype)
+    for name, values in props:
+        data[name] = values.astype(np.float32, copy=False)
+
+    header_lines = [
+        "ply",
+        "format binary_little_endian 1.0",
+        f"element vertex {xyz.shape[0]}",
+    ]
+    for name, _ in props:
+        header_lines.append(f"property float {name}")
+    header_lines.append("end_header")
+    header = "\n".join(header_lines) + "\n"
+
+    with open(path, "wb") as f:
+        f.write(header.encode("ascii"))
+        data.tofile(f)
+
+
+def _coerce_splats(splats: GaussianSplats, device: torch.device, dtype: torch.dtype) -> GaussianSplats:
+    return GaussianSplats(
+        xyz=splats.xyz.to(device=device, dtype=dtype),
+        scale=splats.scale.to(device=device, dtype=dtype),
+        rotation=splats.rotation.to(device=device, dtype=dtype),
+        opacity=splats.opacity.to(device=device, dtype=dtype),
+        f_dc=splats.f_dc.to(device=device, dtype=dtype),
+        f_rest=splats.f_rest.to(device=device, dtype=dtype),
+        sh_order=splats.sh_order,
+    )
+
+
 class LoadPlySplat:
     @classmethod
     def INPUT_TYPES(cls):
@@ -573,6 +755,104 @@ class LoadPlySplat:
         return True
 
 
+class ImageToSplat:
+    @classmethod
+    def INPUT_TYPES(cls):
+        input_dir = folder_paths.get_input_directory()
+        checkpoint_files = [
+            f
+            for f in os.listdir(input_dir)
+            if os.path.isfile(os.path.join(input_dir, f)) and f.lower().endswith(".pt")
+        ]
+        choices = [_SHARP_DEFAULT_CHECKPOINT_LABEL] + sorted(checkpoint_files)
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "horizontal_fov": (
+                    "FLOAT",
+                    {
+                        "default": 60.0,
+                        "min": 1.0,
+                        "max": 179.0,
+                        "tooltip": "Horizontal field of view in degrees used to compute focal length.",
+                    },
+                ),
+                "checkpoint": (
+                    choices,
+                    {
+                        "default": _SHARP_DEFAULT_CHECKPOINT_LABEL,
+                        "file_chooser": True,
+                        "tooltip": "Select a .pt checkpoint from the input folder or download the default model.",
+                    },
+                ),
+            },
+            "optional": {
+                "device": (DEVICE_CHOICES, {"default": "auto"}),
+            },
+        }
+
+    RETURN_TYPES = ("GSPLAT",)
+    RETURN_NAMES = ("splats",)
+    FUNCTION = "image_to_splat"
+    CATEGORY = "Camera/GSplat"
+    DESCRIPTION = "Predicts Gaussian splats from an image using SHARP."
+
+    @torch.no_grad()
+    def image_to_splat(
+        self,
+        image: torch.Tensor,
+        horizontal_fov: float,
+        checkpoint: str,
+        device: str = "auto",
+    ):
+        _ensure_sharp_available()
+        target_device = _resolve_device_choice(device)
+
+        image_np = _tensor_image_to_numpy(image)
+        height, width = image_np.shape[:2]
+        if height < 2 or width < 2:
+            raise ValueError("Input image is too small for SHARP.")
+
+        f_px = _horizontal_fov_to_f_px(width, horizontal_fov)
+        checkpoint_path = None
+        if checkpoint and checkpoint != _SHARP_DEFAULT_CHECKPOINT_LABEL:
+            checkpoint_path = folder_paths.get_annotated_filepath(checkpoint)
+
+        predictor = _load_sharp_predictor(checkpoint_path, target_device)
+        gaussians = _sharp_predict_image(predictor, image_np, float(f_px), target_device)
+
+        mean_vectors = gaussians.mean_vectors[0] if gaussians.mean_vectors.dim() == 3 else gaussians.mean_vectors
+        singular_values = gaussians.singular_values[0] if gaussians.singular_values.dim() == 3 else gaussians.singular_values
+        quaternions = gaussians.quaternions[0] if gaussians.quaternions.dim() == 3 else gaussians.quaternions
+        colors = gaussians.colors[0] if gaussians.colors.dim() == 3 else gaussians.colors
+        opacities = gaussians.opacities[0] if gaussians.opacities.dim() == 2 else gaussians.opacities
+
+        mean_vectors = mean_vectors.to(device=target_device, dtype=torch.float32)
+        singular_values = singular_values.to(device=target_device, dtype=torch.float32)
+        quaternions = quaternions.to(device=target_device, dtype=torch.float32)
+        colors = colors.to(device=target_device, dtype=torch.float32)
+        opacities = opacities.to(device=target_device, dtype=torch.float32)
+
+        scale_logits = torch.log(singular_values.clamp(min=1e-9))
+        opacity = opacities.clamp(1e-6, 1.0 - 1e-6).view(-1, 1)
+        opacity_logits = torch.log(opacity / (1.0 - opacity))
+
+        colors_srgb = _sharp_color_space.linearRGB2sRGB(colors.clamp(0.0, 1.0)).clamp(0.0, 1.0)
+        f_dc = _sharp_rgb_to_sh(colors_srgb).to(dtype=mean_vectors.dtype)
+        f_rest = torch.zeros((mean_vectors.shape[0], 0), device=target_device, dtype=mean_vectors.dtype)
+
+        splats = GaussianSplats(
+            xyz=mean_vectors,
+            scale=scale_logits,
+            rotation=quaternions,
+            opacity=opacity_logits,
+            f_dc=f_dc,
+            f_rest=f_rest,
+            sh_order=0,
+        )
+        return (splats,)
+
+
 class RotateSplats:
     @classmethod
     def INPUT_TYPES(cls) -> Dict[str, Any]:
@@ -596,6 +876,56 @@ class RotateSplats:
         if splats.xyz.device != target_device:
             splats = splats.to(target_device)
         return (splat_cloud_rotation(splats, transform_matrix),)
+
+
+class MergeSplats:
+    @classmethod
+    def INPUT_TYPES(cls) -> Dict[str, Any]:
+        return {
+            "required": {
+                "splats_a": ("GSPLAT",),
+                "splats_b": ("GSPLAT",),
+            },
+            "optional": {
+                "device": (DEVICE_CHOICES, {"default": "auto"}),
+            },
+        }
+
+    RETURN_TYPES = ("GSPLAT",)
+    RETURN_NAMES = ("merged_splats",)
+    FUNCTION = "merge_splats"
+    CATEGORY = "Camera/GSplat"
+    DESCRIPTION = "Merges two GSPLAT objects into one."
+
+    def merge_splats(self, splats_a: GaussianSplats, splats_b: GaussianSplats, device: str = "auto"):
+        if splats_a.f_rest.shape[1] != splats_b.f_rest.shape[1] or splats_a.sh_order != splats_b.sh_order:
+            raise ValueError(
+                f"Splats must share the same SH order and f_rest size (got {splats_a.sh_order}/{splats_a.f_rest.shape[1]} vs "
+                f"{splats_b.sh_order}/{splats_b.f_rest.shape[1]})."
+            )
+
+        if device == "auto":
+            if splats_a.xyz.device == splats_b.xyz.device:
+                target_device = splats_a.xyz.device
+            else:
+                target_device = _resolve_device_choice("auto")
+        else:
+            target_device = _resolve_device_choice(device)
+
+        dtype = torch.promote_types(splats_a.xyz.dtype, splats_b.xyz.dtype)
+        splats_a = _coerce_splats(splats_a, target_device, dtype)
+        splats_b = _coerce_splats(splats_b, target_device, dtype)
+
+        merged = GaussianSplats(
+            xyz=torch.cat([splats_a.xyz, splats_b.xyz], dim=0),
+            scale=torch.cat([splats_a.scale, splats_b.scale], dim=0),
+            rotation=torch.cat([splats_a.rotation, splats_b.rotation], dim=0),
+            opacity=torch.cat([splats_a.opacity, splats_b.opacity], dim=0),
+            f_dc=torch.cat([splats_a.f_dc, splats_b.f_dc], dim=0),
+            f_rest=torch.cat([splats_a.f_rest, splats_b.f_rest], dim=0),
+            sh_order=splats_a.sh_order,
+        )
+        return (merged,)
 
 
 class RenderSplat:
@@ -845,8 +1175,67 @@ class RenderSplat:
         return img.unsqueeze(0), alpha_img, disparity
 
 
+class SavePlySplat:
+    """
+    Save a Gaussian Splat PLY to the ComfyUI output directory.
+    """
+    def __init__(self):
+        self.output_dir = folder_paths.get_output_directory()
+        self.type = "splat"
+        self.prefix_append = ""
+
+    @classmethod
+    def INPUT_TYPES(cls) -> Dict[str, Any]:
+        return {
+            "required": {
+                "splats": ("GSPLAT",),
+                "filename_prefix": (
+                    "STRING",
+                    {
+                        "default": "ComfyUIGSplat",
+                        "tooltip": "Prefix for the .ply file. You can include format-tokens like %date:yyyy-MM-dd%."
+                    }
+                ),
+            },
+            "hidden": {},
+        }
+
+    RETURN_TYPES = ()
+    FUNCTION = "save_splats"
+    OUTPUT_NODE = True
+    CATEGORY = "Camera/GSplat"
+    DESCRIPTION = "Saves the input GSPLAT to your ComfyUI output directory as a .ply file."
+
+    def save_splats(self, splats: GaussianSplats, filename_prefix: str):
+        filename_prefix += self.prefix_append
+        full_output_folder, filename, counter, subfolder, filename_prefix = \
+            folder_paths.get_save_image_path(
+                filename_prefix,
+                self.output_dir,
+                0, 0
+            )
+        os.makedirs(full_output_folder, exist_ok=True)
+        base_name = filename.replace("%batch_num%", "0")
+        ply_name = f"{base_name}_{counter:05}.ply"
+        ply_path = os.path.join(full_output_folder, ply_name)
+        _write_ply_splats(ply_path, splats)
+        counter += 1
+        return {
+            "ui": {
+                "splats": [{
+                    "filename": ply_name,
+                    "subfolder": subfolder,
+                    "type": self.type
+                }]
+            }
+        }
+
+
 NODE_CLASS_MAPPINGS = {
     "LoadPlySplat": LoadPlySplat,
+    "ImageToSplat": ImageToSplat,
     "RotateSplats": RotateSplats,
+    "MergeSplats": MergeSplats,
     "RenderSplat": RenderSplat,
+    "SavePlySplat": SavePlySplat,
 }
