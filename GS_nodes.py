@@ -23,6 +23,14 @@ except ImportError:  # Allow notebook usage outside ComfyUI
 
     folder_paths = _FolderPathsStub()
 
+try:
+    from .reprojection_nodes import ReprojectImage
+except Exception:
+    try:
+        from reprojection_nodes import ReprojectImage
+    except Exception:
+        ReprojectImage = None
+
 _SHARP_AVAILABLE = False
 _SHARP_IMPORT_ERROR: Optional[Exception] = None
 _SHARP_DEFAULT_MODEL_URL = None
@@ -545,6 +553,176 @@ def _tensor_image_to_numpy(image: torch.Tensor) -> np.ndarray:
     return img.numpy()
 
 
+def _list_sharp_checkpoint_choices() -> List[str]:
+    input_dir = folder_paths.get_input_directory()
+    checkpoint_files = [
+        f
+        for f in os.listdir(input_dir)
+        if os.path.isfile(os.path.join(input_dir, f)) and f.lower().endswith(".pt")
+    ]
+    return [_SHARP_DEFAULT_CHECKPOINT_LABEL] + sorted(checkpoint_files)
+
+
+def _build_rotation_matrix(theta_deg: float, phi_deg: float) -> np.ndarray:
+    theta_rad = math.radians(theta_deg)
+    phi_rad = math.radians(phi_deg)
+    r_theta = np.array(
+        [
+            [math.cos(phi_rad), 0.0, math.sin(phi_rad), 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [-math.sin(phi_rad), 0.0, math.cos(phi_rad), 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+        dtype=np.float32,
+    )
+    r_phi = np.array(
+        [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, math.cos(theta_rad), -math.sin(theta_rad), 0.0],
+            [0.0, math.sin(theta_rad), math.cos(theta_rad), 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+        dtype=np.float32,
+    )
+    return r_theta @ r_phi
+
+
+def _concat_splats(splats_list: List[GaussianSplats]) -> GaussianSplats:
+    if not splats_list:
+        raise ValueError("No splats provided to merge.")
+    base = splats_list[0]
+    for splats in splats_list[1:]:
+        if splats.sh_order != base.sh_order or splats.f_rest.shape[1] != base.f_rest.shape[1]:
+            raise ValueError("All splats must have the same SH order to merge.")
+    return GaussianSplats(
+        xyz=torch.cat([s.xyz for s in splats_list], dim=0),
+        scale=torch.cat([s.scale for s in splats_list], dim=0),
+        rotation=torch.cat([s.rotation for s in splats_list], dim=0),
+        opacity=torch.cat([s.opacity for s in splats_list], dim=0),
+        f_dc=torch.cat([s.f_dc for s in splats_list], dim=0),
+        f_rest=torch.cat([s.f_rest for s in splats_list], dim=0),
+        sh_order=base.sh_order,
+    )
+
+
+def _direction_bins(xyz: torch.Tensor, angle_deg: float) -> Tuple[torch.Tensor, int]:
+    if angle_deg <= 0.0:
+        raise ValueError("direction angle must be greater than 0 degrees.")
+    step = math.radians(angle_deg)
+    theta_bins = max(1, int(math.ceil(math.pi / step)))
+    phi_bins = max(1, int(math.ceil(2.0 * math.pi / step)))
+    dirs = xyz / xyz.norm(dim=1, keepdim=True).clamp(min=1e-8)
+    theta = torch.acos(dirs[:, 2].clamp(-1.0, 1.0))
+    phi = torch.atan2(dirs[:, 1], dirs[:, 0])
+    theta_bin = torch.floor(theta / step).to(torch.int64).clamp(min=0, max=theta_bins - 1)
+    phi_bin = torch.floor((phi + math.pi) / step).to(torch.int64).clamp(min=0, max=phi_bins - 1)
+    return theta_bin * phi_bins + phi_bin, phi_bins
+
+
+def _filter_overlapping_by_direction(
+    main: GaussianSplats,
+    other: GaussianSplats,
+    angle_deg: float,
+) -> GaussianSplats:
+    if len(other) == 0:
+        return other
+    main_bins, _ = _direction_bins(main.xyz, angle_deg)
+    main_bins = torch.unique(main_bins)
+    other_bins, _ = _direction_bins(other.xyz, angle_deg)
+    main_bins_sorted, _ = torch.sort(main_bins)
+    idx = torch.searchsorted(main_bins_sorted, other_bins)
+    in_main = (idx < main_bins_sorted.numel()) & (main_bins_sorted[idx] == other_bins)
+    keep = ~in_main
+    return other[keep]
+
+
+def _stitch_splats(
+    splats_list: List[GaussianSplats],
+    mode: str,
+    voxel_size: float,
+    direction_deg: float,
+) -> GaussianSplats:
+    if mode == "main_direction":
+        if not splats_list:
+            raise ValueError("No splats provided to merge.")
+        main = splats_list[0]
+        filtered = [main]
+        for splats in splats_list[1:]:
+            filtered.append(_filter_overlapping_by_direction(main, splats, direction_deg))
+        return _concat_splats(filtered)
+
+    merged = _concat_splats(splats_list)
+    if mode == "keep" or voxel_size <= 0.0 or len(merged) == 0:
+        return merged
+
+    device = merged.xyz.device
+    dtype = merged.xyz.dtype
+    voxel = torch.floor(merged.xyz / float(voxel_size)).to(torch.int64)
+    unique, inv = torch.unique(voxel, dim=0, return_inverse=True)
+    num_voxels = unique.shape[0]
+
+    if mode == "discard":
+        idx = torch.arange(len(merged), device=device, dtype=torch.long)
+        min_idx = torch.full((num_voxels,), len(merged), device=device, dtype=torch.long)
+        min_idx.scatter_reduce_(0, inv, idx, reduce="amin", include_self=True)
+        keep = idx == min_idx[inv]
+        return merged[keep]
+
+    weights = torch.ones((len(merged),), device=device, dtype=dtype)
+    if mode == "smart":
+        opacity = torch.sigmoid(merged.opacity.squeeze(-1))
+        sigma = torch.exp(merged.scale).mean(dim=1)
+        weights = opacity / sigma.clamp(min=1e-6)
+
+    sum_w = torch.zeros((num_voxels,), device=device, dtype=dtype)
+    sum_w.scatter_add_(0, inv, weights)
+    sum_w = sum_w.clamp(min=1e-8)
+
+    def _weighted_sum(values: torch.Tensor) -> torch.Tensor:
+        if values.numel() == 0:
+            return values.new_zeros((num_voxels, values.shape[1]))
+        out = torch.zeros((num_voxels, values.shape[1]), device=device, dtype=values.dtype)
+        out.scatter_add_(0, inv[:, None].expand(-1, values.shape[1]), values * weights[:, None])
+        return out
+
+    xyz = _weighted_sum(merged.xyz) / sum_w[:, None]
+    sigma = _weighted_sum(torch.exp(merged.scale)) / sum_w[:, None]
+    scale = torch.log(sigma.clamp(min=1e-9))
+
+    idx = torch.arange(len(merged), device=device, dtype=torch.long)
+    min_idx = torch.full((num_voxels,), len(merged), device=device, dtype=torch.long)
+    min_idx.scatter_reduce_(0, inv, idx, reduce="amin", include_self=True)
+    ref = merged.rotation[min_idx]
+    ref_per = ref[inv]
+    dot = (merged.rotation * ref_per).sum(dim=1, keepdim=True)
+    aligned = torch.where(dot < 0, -merged.rotation, merged.rotation)
+    rot_sum = _weighted_sum(aligned)
+    rotation = rot_sum / sum_w[:, None]
+    rotation = rotation / rotation.norm(dim=1, keepdim=True).clamp(min=1e-8)
+
+    f_dc = _weighted_sum(merged.f_dc) / sum_w[:, None]
+    if merged.f_rest.shape[1] > 0:
+        f_rest = _weighted_sum(merged.f_rest) / sum_w[:, None]
+    else:
+        f_rest = merged.f_rest.new_zeros((num_voxels, 0))
+
+    opacity = torch.sigmoid(merged.opacity.squeeze(-1))
+    opacity_sum = torch.zeros((num_voxels,), device=device, dtype=dtype)
+    opacity_sum.scatter_add_(0, inv, opacity * weights)
+    opacity_avg = (opacity_sum / sum_w).clamp(1e-6, 1.0 - 1e-6)
+    opacity_logits = torch.log(opacity_avg / (1.0 - opacity_avg)).view(-1, 1)
+
+    return GaussianSplats(
+        xyz=xyz,
+        scale=scale,
+        rotation=rotation,
+        opacity=opacity_logits,
+        f_dc=f_dc,
+        f_rest=f_rest,
+        sh_order=merged.sh_order,
+    )
+
+
 def _get_sharp_default_checkpoint_path() -> Optional[str]:
     if _SHARP_DEFAULT_MODEL_URL is None:
         return None
@@ -758,13 +936,7 @@ class LoadPlySplat:
 class ImageToSplat:
     @classmethod
     def INPUT_TYPES(cls):
-        input_dir = folder_paths.get_input_directory()
-        checkpoint_files = [
-            f
-            for f in os.listdir(input_dir)
-            if os.path.isfile(os.path.join(input_dir, f)) and f.lower().endswith(".pt")
-        ]
-        choices = [_SHARP_DEFAULT_CHECKPOINT_LABEL] + sorted(checkpoint_files)
+        choices = _list_sharp_checkpoint_choices()
         return {
             "required": {
                 "image": ("IMAGE",),
@@ -851,6 +1023,134 @@ class ImageToSplat:
             sh_order=0,
         )
         return (splats,)
+
+
+class FisheyeToGaussian:
+    @classmethod
+    def INPUT_TYPES(cls):
+        choices = _list_sharp_checkpoint_choices()
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "fisheye_horizontal_fov": (
+                    "FLOAT",
+                    {
+                        "default": 180.0,
+                        "min": 1.0,
+                        "max": 360.0,
+                        "tooltip": "Horizontal field of view for the fisheye input.",
+                    },
+                ),
+                "output_width": ("INT", {"default": 0, "min": 0, "max": 16384}),
+                "output_height": ("INT", {"default": 0, "min": 0, "max": 16384}),
+                "checkpoint": (
+                    choices,
+                    {
+                        "default": _SHARP_DEFAULT_CHECKPOINT_LABEL,
+                        "file_chooser": True,
+                        "tooltip": "Select a .pt checkpoint from the input folder or download the default model.",
+                    },
+                ),
+            },
+            "optional": {
+                "device": (DEVICE_CHOICES, {"default": "auto"}),
+                "pinhole_horizontal_fov": (
+                    "FLOAT",
+                    {"default": 90.0, "min": 1.0, "max": 179.0},
+                ),
+                "feathering": ("INT", {"default": 0, "min": 0, "max": 512}),
+                "stitch_mode": (
+                    ["keep", "discard", "average", "smart", "main_direction"],
+                    {"default": "smart"},
+                ),
+                "stitch_voxel_size": (
+                    "FLOAT",
+                    {"default": 0.01, "min": 0.0, "max": 10.0},
+                ),
+                "stitch_direction_deg": (
+                    "FLOAT",
+                    {"default": 5.0, "min": 0.1, "max": 45.0},
+                ),
+            },
+        }
+
+    RETURN_TYPES = ("GSPLAT",)
+    RETURN_NAMES = ("splats",)
+    FUNCTION = "fisheye_to_gaussian"
+    CATEGORY = "Camera/GSplat"
+    DESCRIPTION = "Reprojects fisheye views to multiple pinhole angles, predicts splats, rotates and merges them."
+
+    @torch.no_grad()
+    def fisheye_to_gaussian(
+        self,
+        image: torch.Tensor,
+        fisheye_horizontal_fov: float,
+        output_width: int,
+        output_height: int,
+        checkpoint: str,
+        device: str = "auto",
+        pinhole_horizontal_fov: float = 90.0,
+        feathering: int = 0,
+        stitch_mode: str = "smart",
+        stitch_voxel_size: float = 0.01,
+        stitch_direction_deg: float = 5.0,
+    ):
+        _ensure_sharp_available()
+        if ReprojectImage is None:
+            raise ModuleNotFoundError("ReprojectImage is unavailable; reprojection_nodes could not be imported.")
+
+        image_tensor = image
+        if image_tensor.dim() == 3:
+            image_tensor = image_tensor.unsqueeze(0)
+        if image_tensor.dim() != 4:
+            raise ValueError("Expected IMAGE tensor with shape [B,H,W,C].")
+
+        _, height, width, _ = image_tensor.shape
+        if output_width <= 0:
+            output_width = int(width)
+        if output_height <= 0:
+            output_height = int(height)
+
+        image_to_splat = ImageToSplat()
+        reproject = ReprojectImage()
+
+        view_angles = [
+            (0.0, 0.0),
+            (0.0, 45.0),
+            (0.0, -45.0),
+            (45.0, 0.0),
+            (-45.0, 0.0),
+        ]
+
+        splats_list: List[GaussianSplats] = []
+        for theta, phi in view_angles:
+            transform = _build_rotation_matrix(theta, phi)
+            reproj_image, _ = reproject.reproject_image(
+                image_tensor,
+                fisheye_horizontal_fov,
+                pinhole_horizontal_fov,
+                "FISHEYE",
+                "PINHOLE",
+                output_width,
+                output_height,
+                feathering,
+                False,
+                transform,
+                None,
+            )
+
+            splats, = image_to_splat.image_to_splat(
+                reproj_image,
+                pinhole_horizontal_fov,
+                checkpoint,
+                device,
+            )
+            if theta != 0.0 or phi != 0.0:
+                splats = splat_cloud_rotation(splats, transform)
+            splats_list.append(splats)
+
+        merged = _stitch_splats(splats_list, stitch_mode, stitch_voxel_size, stitch_direction_deg)
+        return (merged,)
 
 
 class RotateSplats:
@@ -1234,6 +1534,7 @@ class SavePlySplat:
 NODE_CLASS_MAPPINGS = {
     "LoadPlySplat": LoadPlySplat,
     "ImageToSplat": ImageToSplat,
+    "FisheyeToGaussian": FisheyeToGaussian,
     "RotateSplats": RotateSplats,
     "MergeSplats": MergeSplats,
     "RenderSplat": RenderSplat,
