@@ -14,6 +14,7 @@
 * [Installation](#installation)
 * [Node Categories](#node-categories)
 * [Node Reference](#node-reference)
+* [Video → 4D World](#video--4d-world)
 * [Workflows](#workflows)
 * [Example Workflows](#example-workflows)
 * [Contributing](#contributing)
@@ -55,6 +56,13 @@ A collection of ComfyUI custom nodes to handle diverse camera projections (pinho
 
    * *Optional:* `open3d` for GUI point cloud tools.
 
+   **Optional dependencies** (only needed for specific nodes):
+
+   * **gsplat** — CUDA-accelerated Gaussian splat rasterizer. Required by `SplatPolish` and used as the fast render backend for `RenderSplat` / `RenderSplats4D*`. Needs a CUDA GPU and a matching PyTorch build: `pip install gsplat`.
+   * **vggt** — camera pose + depth estimation (`VideoPoseEstimator`). Install with `pip install vggt` (or `pip install git+https://github.com/facebookresearch/vggt.git`), or clone [facebookresearch/vggt](https://github.com/facebookresearch/vggt) as a sibling folder in your ComfyUI root. The `facebook/VGGT-1B` weights (~5 GB) download via `huggingface_hub` on first use.
+   * **CoTracker3** — point tracking for `EstimateTracks`. No manual install: it is fetched automatically via `torch.hub` on first use.
+   * **SHARP** — image→splat prediction (`ImageToSplat`, `FisheyeToGaussian`, `VideoToFusedSplats`, `SplatTrajectoryEnricher`). Ships as the existing git submodule at `submodules/ml-sharpt` ([apple/ml-sharp](https://github.com/apple/ml-sharp)) — run `git submodule update --init` after cloning.
+
 4. **Additional Nodes** (for certain workflows):
 
    * Clone the following repositories directly into your `custom_nodes` folder:
@@ -94,12 +102,32 @@ A collection of ComfyUI custom nodes to handle diverse camera projections (pinho
 * ### Point Cloud Nodes
 
   * `DepthToPointCloud`, `TransformPointCloud`, `ProjectPointCloud`, `PointCloudUnion`
-  * `PointCloudCleaner`, `LoadPointCloud`, `SavePointCloud`, `ProjectAndClean`
+  * `PointCloudCleaner`, `LoadPointCloud`, `SavePointCloud`, `ProjectAndClean`, `DepthEdgeFilter`
 
 * ### Trajectory Nodes
 
   * `CameraMotionNode`, `CameraInterpolationNode`, `CameraTrajectoryNode`
   * `SaveTrajectory`, `LoadTrajectory`, `PointcloudTrajectoryEnricher`
+
+* ### Gaussian Splat Nodes
+
+  * `LoadPlySplat`, `SavePlySplat`, `ImageToSplat`, `FisheyeToGaussian`
+  * `RotateSplats`, `MergeSplats`, `FuseSplats`, `RenderSplat`
+  * `VideoToFusedSplats`, `SplatPolish`
+
+* ### 4D Gaussian Splat Nodes
+
+  * `MotionMaskFromDepth`, `EstimateTracks`, `TracksToTrajectories`, `SplitSplatsByMask`
+  * `BuildSplats4D`, `RenderSplats4DFrame`, `RenderSplats4DVideo`
+  * `SaveSplats4D`, `LoadSplats4D`
+
+* ### Pose Nodes
+
+  * `VideoPoseEstimator`, `TrajectoryInvert`, `TrajectoryCompose`
+
+* ### World Nodes
+
+  * `DepthScaleAnchor`, `SplatTrajectoryEnricher`, `SphereSplatSeed`
 
 ---
 
@@ -130,6 +158,51 @@ A collection of ComfyUI custom nodes to handle diverse camera projections (pinho
 | `VideoCameraMotionSequence` | Processes video frames and depth maps along a camera trajectory, generating reprojected outputs. |
 | `DepthFramesToVideo`      | Converts a sequence of depth maps into video frame tensors for saving.        |
 | `VideoMetricDepthEstimate` | Estimates metric depth for a sequence of frames using VideoDepthAnything.    |
+| `DepthEdgeFilter`         | Detects "flying pixel" depth discontinuities and outputs a validity mask (1.0 = valid). |
+| `LoadPlySplat`            | Loads a 3D Gaussian Splatting `.ply` file into a `GSPLAT` object.             |
+| `SavePlySplat`            | Saves a `GSPLAT` to the ComfyUI output directory as a `.ply` file.            |
+| `ImageToSplat`            | Predicts Gaussian splats from a single image using SHARP.                     |
+| `FisheyeToGaussian`       | Reprojects a fisheye view to multiple pinhole angles, predicts splats, rotates and merges them. |
+| `RotateSplats`            | Applies a 4×4 transform matrix to a splat cloud.                              |
+| `MergeSplats`             | Concatenates two `GSPLAT` objects into one.                                   |
+| `FuseSplats`              | Fuses two splat clouds with weighted voxel merging (keep/discard/average/smart modes). |
+| `RenderSplat`             | Renders a splat cloud from a camera pose into an image + mask.                |
+| `VideoToFusedSplats`      | Runs SHARP on video keyframes, scale-aligns to metric depth, filters dynamic pixels, and fuses all keyframes into one world-frame splat cloud. |
+| `SplatPolish`             | Optimizes a world-frame splat cloud against posed video frames (L1 + D-SSIM) using gsplat's differentiable rasterizer. |
+| `MotionMaskFromDepth`     | Detects dynamic pixels from a depth+pose sequence (1.0 = moving).             |
+| `EstimateTracks`          | Runs CoTracker3 on a video; returns tracks `[T,N,2]` (pixels) and visibility `[T,N]`. |
+| `TracksToTrajectories`    | Unprojects 2D tracks with depth and camera poses into world-space 3D trajectories `[T,M,3]`. |
+| `SplitSplatsByMask`       | Projects splat centers into a 2D mask and splits the cloud into inside/outside parts. |
+| `BuildSplats4D`           | Builds a 4D splat scene: each canonical splat follows a kNN blend of track control-point motions. |
+| `RenderSplats4DFrame`     | Evaluates the 4D scene at a single time value and renders it from a given camera. |
+| `RenderSplats4DVideo`     | Interpolates the camera path, sweeps time from start to end, and renders each frame. |
+| `SaveSplats4D`            | Saves a `GSPLAT4D` scene as an `.npz` archive (plus optional per-frame PLYs). |
+| `LoadSplats4D`            | Loads a `GSPLAT4D` scene from an `.npz` archive.                              |
+| `VideoPoseEstimator`      | VGGT-based per-frame camera poses `[T,4,4]`, depth maps, FOV and depth confidence from a video clip. |
+| `TrajectoryInvert`        | Inverts each 4×4 pose (world-to-camera ↔ camera-to-world).                   |
+| `TrajectoryCompose`       | Per-frame matrix product `A @ B`; a single 4×4 input broadcasts over the other. |
+| `DepthScaleAnchor`        | Robustly aligns a depth map to a reference depth via disparity-domain scale(+shift). |
+| `SplatTrajectoryEnricher` | Expands a splat world along a trajectory: render, outpaint holes with Flux, lift with SHARP, scale-align, smart-stitch. |
+| `SphereSplatSeed`         | Converts an equirectangular panorama into a Gaussian sphere seeding a 360° world. |
+
+---
+
+## Video → 4D World
+
+Turn a monocular video into a navigable 4D (3D + time) Gaussian splat scene and re-render it from any novel camera trajectory. The reference workflow is **`workflows/video_to_4d_world.json`**; the stages are:
+
+1. **Pose & depth (VGGT)** — `VideoPoseEstimator` estimates per-frame world-to-camera poses `[T,4,4]`, depth maps, FOV and depth confidence from the input frames. Since the depth maps are Z-depths, run `ZDepthToRayDepthNode` before any node that expects ray depth (see caveats below). `DepthEdgeFilter` can additionally mask out flying pixels at depth discontinuities.
+2. **Motion masking** — `MotionMaskFromDepth` warps depth between frames using the estimated poses and flags pixels whose residual is too large as dynamic (moving objects vs. static background).
+3. **Static splat fusion + polish** — `VideoToFusedSplats` runs SHARP on keyframes, keeps only static pixels (via the motion mask), scale-aligns each keyframe to metric depth, transforms splats into the world frame and fuses them incrementally. `SplatPolish` then fine-tunes the fused cloud photometrically against the posed video frames.
+4. **Tracked dynamic 4D Gaussians** — `EstimateTracks` (CoTracker3) tracks a dense point grid across the video; `TracksToTrajectories` lifts the tracks to world-space 3D using depth + poses; `SplitSplatsByMask` separates dynamic splats from the static background; `BuildSplats4D` binds the dynamic canonical splats to track control points via kNN blending, producing a `GSPLAT4D` scene.
+5. **Render a novel trajectory** — build any new camera path (e.g. `CameraInterpolationNode`, `TrajectoryCompose` to retarget relative to a source pose) and render with `RenderSplats4DVideo` (or single frames with `RenderSplats4DFrame`). Save/reload scenes with `SaveSplats4D` / `LoadSplats4D`.
+
+### Caveats
+
+* **Z-depth vs ray depth**: depth estimators (including `VideoPoseEstimator`) output Z-depth; point-cloud and splat lifting nodes expect ray depth. Insert `ZDepthToRayDepthNode` where needed, or geometry will bow at wide FOVs.
+* **`SplatPolish` requires gsplat + CUDA**: without them it can fall back to the differentiable torch renderer at reduced resolution, which is extremely slow (minutes per 100 iterations).
+* **`EstimateTracks` downloads CoTracker3 via `torch.hub` on first use** — expect a one-time download and allow network access.
+* **`VideoPoseEstimator` downloads `facebook/VGGT-1B` (~5 GB)** on first use via `huggingface_hub`.
 
 ---
 
@@ -150,6 +223,8 @@ A set of JSON workflows illustrating typical use cases. Each workflow lives in `
 | **Pointcloud\_walker.json**            | GUI‐based camera control via Open3D                            |
 | **sbs180\_workflow.json**              | Generate stereo (side-by-side) wide-angle/fisheye/equirectangular stereo pairs from a high-res input |
 | **video_camera.json**                  | Camera trajectory movement workflow using `wan-vace` for video inpainting. |
+| **video_to_4d_world\.json**            | Video → 4D world: VGGT poses/depth → motion masking → fused static splats + polish → tracked dynamic 4D Gaussians → novel-trajectory render. |
+| **video_to_4d_walkable_world\.json**   | Video → 4D WALKABLE world (test-friendly defaults): polished static splats enriched along a walk trajectory (`SplatTrajectoryEnricher`, Flux outpaint + SHARP) → 4D scene → walk-through render + `.ply`/`.npz` exports for free walking in external 3DGS viewers. |
 
 ---
 
@@ -268,9 +343,12 @@ Contributions welcome! Please open issues or PRs to add features, improve docs, 
 * [x] Add processing to pointcloud or depthmap to remove outlier and lonely points at depth borders.
 * [x] Use built-in comfyUI mask type an image.
 * [x] Unite nodes into groups to simplify workflows.
-* [ ] Create a single workflow for view synthesis.
+* [x] Create a single workflow for view synthesis (`video_to_4d_world.json`).
 * [x] Implement easier and more flexible camera control - more complex camera movements with more than 2 points.
 * [x] Add more examples and documentation for each node.
 * [x] Add pointcloud union
 * [x] Fix imports for renamed folders (e.g., inpainting_flux)
 * [x] Integrate camera movement pipeline with video models (e.g., wan2.1) for smooth, high-quality inpainting along camera trajectories.
+* [ ] Compressed export format for 4D scenes (current `.npz` stores raw tensors).
+* [ ] SAM2-based refinement of motion masks (current masks come from depth-warp residuals only).
+* [ ] Fisheye/equirectangular rendering through gsplat (e.g., via cubemap render + reprojection); the fast CUDA path is currently pinhole-only.

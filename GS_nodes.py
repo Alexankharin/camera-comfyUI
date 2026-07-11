@@ -11,6 +11,7 @@ from typing import Dict, Any, Tuple, List, Optional
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 try:
     import folder_paths
@@ -57,6 +58,8 @@ class Projection:
 
 DEVICE_CHOICES = ["auto", "cpu", "cuda"]
 RENDER_MODES = ["fast", "over"]
+RENDER_MODES_ALL = ["auto", "gsplat", "fast", "over"]
+FUSE_MODES = ["smart", "average", "discard", "keep"]
 
 
 def _infer_sh_order(f_rest_channels: int) -> int:
@@ -605,6 +608,44 @@ def _concat_splats(splats_list: List[GaussianSplats]) -> GaussianSplats:
     )
 
 
+def _pad_sh_order(splats: GaussianSplats, sh_order: int) -> GaussianSplats:
+    """Zero-pad a splat cloud's SH coefficients up to ``sh_order``.
+
+    The SH decode used throughout this file (``sh_coeffs`` / ``eval_sh``) is
+    ``cat([f_dc, f_rest], dim=1).view(-1, 3, total)`` — channel-major over the
+    concatenated flat vector — so padding must reflow the existing
+    ``(3, total_old)`` coefficient rows into a zeroed ``(3, total_new)`` block
+    and re-flatten. Simply appending zeros to f_rest would shift the green/blue
+    DC terms into the red channel's l>=1 slots and corrupt colors.
+    """
+    if splats.sh_order == sh_order:
+        return splats
+    if splats.sh_order > sh_order:
+        raise ValueError("Cannot reduce SH order by zero-padding.")
+    total_old = (splats.sh_order + 1) ** 2
+    total_new = (sh_order + 1) ** 2
+    n = splats.xyz.shape[0]
+    old = torch.cat([splats.f_dc, splats.f_rest], dim=1).view(n, 3, total_old)
+    coeffs = torch.zeros((n, 3, total_new), device=splats.f_dc.device, dtype=splats.f_dc.dtype)
+    coeffs[:, :, :total_old] = old
+    flat = coeffs.reshape(n, 3 * total_new)
+    return GaussianSplats(
+        xyz=splats.xyz,
+        scale=splats.scale,
+        rotation=splats.rotation,
+        opacity=splats.opacity,
+        f_dc=flat[:, :3],
+        f_rest=flat[:, 3:],
+        sh_order=sh_order,
+    )
+
+
+def _match_sh_orders(a: GaussianSplats, b: GaussianSplats) -> Tuple[GaussianSplats, GaussianSplats]:
+    """Bring two splat clouds to a common (max) SH order via zero padding."""
+    order = max(a.sh_order, b.sh_order)
+    return _pad_sh_order(a, order), _pad_sh_order(b, order)
+
+
 def _direction_bins(xyz: torch.Tensor, angle_deg: float) -> Tuple[torch.Tensor, int]:
     if angle_deg <= 0.0:
         raise ValueError("direction angle must be greater than 0 degrees.")
@@ -619,20 +660,26 @@ def _direction_bins(xyz: torch.Tensor, angle_deg: float) -> Tuple[torch.Tensor, 
     return theta_bin * phi_bins + phi_bin, phi_bins
 
 
-def _filter_overlapping_by_direction(
-    main: GaussianSplats,
+def _filter_overlapping_by_fov(
     other: GaussianSplats,
-    angle_deg: float,
+    horizontal_fov: float,
+    padding_deg: float,
 ) -> GaussianSplats:
     if len(other) == 0:
         return other
-    main_bins, _ = _direction_bins(main.xyz, angle_deg)
-    main_bins = torch.unique(main_bins)
-    other_bins, _ = _direction_bins(other.xyz, angle_deg)
-    main_bins_sorted, _ = torch.sort(main_bins)
-    idx = torch.searchsorted(main_bins_sorted, other_bins)
-    in_main = (idx < main_bins_sorted.numel()) & (main_bins_sorted[idx] == other_bins)
-    keep = ~in_main
+    if horizontal_fov <= 0.0 or horizontal_fov >= 179.0:
+        raise ValueError("horizontal_fov must be between 0 and 179 degrees.")
+    half_fov = math.radians(horizontal_fov) * 0.5
+    if padding_deg != 0.0:
+        half_fov += math.radians(padding_deg)
+    max_half = math.radians(89.9)
+    half_fov = max(1e-6, min(half_fov, max_half))
+    X, Y, Z = other.xyz.unbind(-1)
+    in_front = Z > 1e-6
+    x_angle = torch.atan2(X, Z)
+    y_angle = torch.atan2(Y, Z)
+    in_square = (x_angle.abs() <= half_fov) & (y_angle.abs() <= half_fov)
+    keep = ~(in_front & in_square)
     return other[keep]
 
 
@@ -641,14 +688,29 @@ def _stitch_splats(
     mode: str,
     voxel_size: float,
     direction_deg: float,
+    pinhole_fov: Optional[float] = None,
+    weights_list: Optional[List[float]] = None,
 ) -> GaussianSplats:
+    """Merge multiple splat clouds, optionally reducing duplicates per voxel.
+
+    weights_list: optional per-list weight multipliers (one float per entry of
+    splats_list) applied to the per-splat weights before the voxel reduction.
+    Only affects the "smart" and "average" modes; "keep", "discard" and
+    "main_direction" ignore it.
+    """
+    if weights_list is not None and len(weights_list) != len(splats_list):
+        raise ValueError(
+            f"weights_list length ({len(weights_list)}) must match splats_list length ({len(splats_list)})."
+        )
     if mode == "main_direction":
         if not splats_list:
             raise ValueError("No splats provided to merge.")
+        if pinhole_fov is None:
+            raise ValueError("pinhole_fov is required for main_direction stitching.")
         main = splats_list[0]
         filtered = [main]
         for splats in splats_list[1:]:
-            filtered.append(_filter_overlapping_by_direction(main, splats, direction_deg))
+            filtered.append(_filter_overlapping_by_fov(splats, pinhole_fov, direction_deg))
         return _concat_splats(filtered)
 
     merged = _concat_splats(splats_list)
@@ -673,9 +735,22 @@ def _stitch_splats(
         opacity = torch.sigmoid(merged.opacity.squeeze(-1))
         sigma = torch.exp(merged.scale).mean(dim=1)
         weights = opacity / sigma.clamp(min=1e-6)
+    if weights_list is not None:
+        multipliers = torch.cat(
+            [
+                torch.full((len(s),), float(w), device=device, dtype=dtype)
+                for s, w in zip(splats_list, weights_list)
+            ]
+        )
+        weights = weights * multipliers.clamp(min=0.0)
 
     sum_w = torch.zeros((num_voxels,), device=device, dtype=dtype)
     sum_w.scatter_add_(0, inv, weights)
+    # Voxels whose total weight is ~0 (e.g. FuseSplats with weight 0.0 for one
+    # cloud, in voxels populated only by that cloud) would otherwise reduce to
+    # degenerate splats at the origin (all-zero weighted sums divided by the
+    # clamp); drop those voxels instead.
+    nonzero_voxel = sum_w > 1e-8
     sum_w = sum_w.clamp(min=1e-8)
 
     def _weighted_sum(values: torch.Tensor) -> torch.Tensor:
@@ -712,7 +787,7 @@ def _stitch_splats(
     opacity_avg = (opacity_sum / sum_w).clamp(1e-6, 1.0 - 1e-6)
     opacity_logits = torch.log(opacity_avg / (1.0 - opacity_avg)).view(-1, 1)
 
-    return GaussianSplats(
+    out = GaussianSplats(
         xyz=xyz,
         scale=scale,
         rotation=rotation,
@@ -721,6 +796,9 @@ def _stitch_splats(
         f_rest=f_rest,
         sh_order=merged.sh_order,
     )
+    if not bool(nonzero_voxel.all()):
+        out = out[nonzero_voxel]
+    return out
 
 
 def _get_sharp_default_checkpoint_path() -> Optional[str]:
@@ -847,6 +925,620 @@ def _coerce_splats(splats: GaussianSplats, device: torch.device, dtype: torch.dt
         f_rest=splats.f_rest.to(device=device, dtype=dtype),
         sh_order=splats.sh_order,
     )
+
+
+def _progress(iterable, desc: str = ""):
+    """Wrap an iterable with tqdm if it is available, otherwise pass through."""
+    try:
+        from tqdm import tqdm
+
+        return tqdm(iterable, desc=desc)
+    except Exception:
+        return iterable
+
+
+_GSPLAT_AVAILABLE_CACHE: Optional[bool] = None
+
+
+def _gsplat_available() -> bool:
+    """Return True if the gsplat package is importable (checked once, cached)."""
+    global _GSPLAT_AVAILABLE_CACHE
+    if _GSPLAT_AVAILABLE_CACHE is None:
+        try:
+            import importlib.util
+
+            _GSPLAT_AVAILABLE_CACHE = importlib.util.find_spec("gsplat") is not None
+        except Exception:
+            _GSPLAT_AVAILABLE_CACHE = False
+    return _GSPLAT_AVAILABLE_CACHE
+
+
+def _import_gsplat():
+    """Lazy-import gsplat with an actionable error message."""
+    try:
+        import gsplat
+    except ImportError as exc:
+        raise RuntimeError(
+            "gsplat is required for render_mode='gsplat' and SplatPolish. "
+            "Install it with: pip install gsplat (requires a CUDA-enabled PyTorch build). "
+            f"Import error: {exc}"
+        ) from exc
+    return gsplat
+
+
+def _quats_to_rotation_matrices(quats: torch.Tensor) -> torch.Tensor:
+    """Convert [N,4] wxyz quaternions to [N,3,3] rotation matrices."""
+    q = quats / quats.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+    w, x, y, z = q.unbind(-1)
+    return torch.stack(
+        [
+            1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - w * z), 2.0 * (x * z + w * y),
+            2.0 * (x * y + w * z), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - w * x),
+            2.0 * (x * z - w * y), 2.0 * (y * z + w * x), 1.0 - 2.0 * (x * x + y * y),
+        ],
+        dim=-1,
+    ).view(-1, 3, 3)
+
+
+def _empty_render(output_width: int, output_height: int, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Black image, zero alpha and zero disparity for views with no visible splats."""
+    img = torch.zeros((1, output_height, output_width, 3), device=device)
+    mask = torch.zeros((output_height, output_width), device=device)
+    disparity = torch.zeros((1, output_height, output_width, 1), device=device)
+    return img, mask, disparity
+
+
+def _ssim(img1: torch.Tensor, img2: torch.Tensor, window_size: int = 11, sigma: float = 1.5) -> torch.Tensor:
+    """Mean SSIM of two [B,C,H,W] images with values in [0,1]."""
+    channels = img1.shape[1]
+    coords = torch.arange(window_size, dtype=img1.dtype, device=img1.device) - (window_size - 1) / 2.0
+    g = torch.exp(-(coords * coords) / (2.0 * sigma * sigma))
+    g = g / g.sum()
+    window = (g[:, None] @ g[None, :]).expand(channels, 1, window_size, window_size).contiguous()
+    pad = window_size // 2
+    mu1 = F.conv2d(img1, window, padding=pad, groups=channels)
+    mu2 = F.conv2d(img2, window, padding=pad, groups=channels)
+    mu1_sq = mu1 * mu1
+    mu2_sq = mu2 * mu2
+    mu12 = mu1 * mu2
+    sigma1_sq = F.conv2d(img1 * img1, window, padding=pad, groups=channels) - mu1_sq
+    sigma2_sq = F.conv2d(img2 * img2, window, padding=pad, groups=channels) - mu2_sq
+    sigma12 = F.conv2d(img1 * img2, window, padding=pad, groups=channels) - mu12
+    c1 = 0.01 ** 2
+    c2 = 0.03 ** 2
+    ssim_map = ((2.0 * mu12 + c1) * (2.0 * sigma12 + c2)) / (
+        (mu1_sq + mu2_sq + c1) * (sigma1_sq + sigma2_sq + c2)
+    )
+    return ssim_map.mean()
+
+
+def _coerce_trajectory(trajectory, num_frames: int, device: torch.device) -> torch.Tensor:
+    """Coerce a trajectory input to a [num_frames,4,4] float tensor on device.
+
+    Accepts [4,4] (broadcast to all frames), [1,4,4] or [num_frames,4,4].
+    """
+    if isinstance(trajectory, torch.Tensor):
+        traj = trajectory.detach().float()
+    else:
+        traj = torch.tensor(trajectory, dtype=torch.float32)
+    if traj.dim() == 2:
+        traj = traj.unsqueeze(0)
+    if traj.dim() != 3 or traj.shape[-2:] != (4, 4):
+        raise ValueError(f"trajectory must be [T,4,4], got shape {tuple(traj.shape)}")
+    if traj.shape[0] == 1 and num_frames > 1:
+        traj = traj.expand(num_frames, 4, 4)
+    if traj.shape[0] != num_frames:
+        raise ValueError(
+            f"trajectory has {traj.shape[0]} poses but {num_frames} frames were provided."
+        )
+    return traj.to(device)
+
+
+def _normalize_map_sequence(seq, num_frames: int, name: str) -> torch.Tensor:
+    """Coerce a per-frame map (depth/mask) input to [T,H,W] float ([1,H,W] broadcasts)."""
+    if not isinstance(seq, torch.Tensor):
+        seq = torch.tensor(seq, dtype=torch.float32)
+    seq = seq.float()
+    if seq.dim() == 4 and seq.shape[-1] == 1:
+        seq = seq[..., 0]
+    if seq.dim() == 2:
+        seq = seq.unsqueeze(0)
+    if seq.dim() != 3:
+        raise ValueError(f"{name} must be [T,H,W] (or [H,W]), got shape {tuple(seq.shape)}")
+    if seq.shape[0] not in (1, num_frames):
+        raise ValueError(
+            f"{name} has {seq.shape[0]} frames but the video has {num_frames}."
+        )
+    return seq
+
+
+def _project_splats_to_pixels(
+    xyz_cam: torch.Tensor,
+    horizontal_fov: float,
+    width: int,
+    height: int,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Project camera-frame splat centers to pixel coordinates of the source pinhole image.
+
+    Uses the same focal convention as SHARP/ImageToSplat (single f_px from the
+    horizontal FOV over the width). Returns (px, py, z, in_bounds).
+    """
+    f_px = _horizontal_fov_to_f_px(width, horizontal_fov)
+    X, Y, Z = xyz_cam.unbind(-1)
+    zc = Z.clamp(min=1e-6)
+    px = X / zc * f_px + (width - 1) / 2.0
+    py = Y / zc * f_px + (height - 1) / 2.0
+    in_bounds = (Z > 1e-6) & (px >= 0.0) & (px <= width - 1) & (py >= 0.0) & (py <= height - 1)
+    return px, py, Z, in_bounds
+
+
+def _sample_map_at_pixels(
+    map_hw: torch.Tensor,
+    px: torch.Tensor,
+    py: torch.Tensor,
+    width: int,
+    height: int,
+) -> torch.Tensor:
+    """Nearest-neighbour sample a [Hm,Wm] map at pixel coords defined on a width x height image."""
+    map_h, map_w = int(map_hw.shape[0]), int(map_hw.shape[1])
+    if map_w == width and map_h == height:
+        xi = px.round().long().clamp(0, map_w - 1)
+        yi = py.round().long().clamp(0, map_h - 1)
+    else:
+        xi = (px / max(width - 1, 1) * (map_w - 1)).round().long().clamp(0, map_w - 1)
+        yi = (py / max(height - 1, 1) * (map_h - 1)).round().long().clamp(0, map_h - 1)
+    return map_hw[yi, xi]
+
+
+def _render_gaussians_gsplat(
+    splats: GaussianSplats,
+    view_matrix: torch.Tensor,
+    camera_horizontal_fov: float,
+    output_width: int,
+    output_height: int,
+    max_splats: int,
+    opacity_is_logit: bool,
+    add_sh_bias: bool,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """CUDA gsplat rasterization backend (PINHOLE only). Returns (image, alpha, disparity)."""
+    gsplat = _import_gsplat()
+    dev = splats.xyz.device
+    if dev.type != "cuda":
+        raise RuntimeError(
+            "render_mode='gsplat' requires CUDA tensors. Set device='cuda' "
+            "(or 'auto' on a CUDA machine), or use render_mode='fast'."
+        )
+    if len(splats) == 0:
+        return _empty_render(output_width, output_height, dev)
+
+    means = splats.xyz.float()
+    quats = splats.rotation.float()
+    quats = quats / quats.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+    scales = torch.exp(splats.scale.float())
+    opacity = splats.opacity.float().view(-1)
+    if opacity_is_logit:
+        opacity = torch.sigmoid(opacity)
+    else:
+        opacity = opacity.clamp(0.0, 1.0)
+    f_dc = splats.f_dc.float()
+    f_rest = splats.f_rest.float()
+
+    if max_splats > 0 and means.shape[0] > max_splats:
+        keep = torch.topk(opacity, k=max_splats).indices
+        means = means[keep]
+        quats = quats[keep]
+        scales = scales[keep]
+        opacity = opacity[keep]
+        f_dc = f_dc[keep]
+        f_rest = f_rest[keep]
+
+    total = (splats.sh_order + 1) ** 2
+    if add_sh_bias:
+        # gsplat evaluates SH internally and adds the +0.5 bias itself.
+        colors = torch.cat([f_dc, f_rest], dim=1).view(-1, 3, total).transpose(1, 2).contiguous()
+        sh_degree: Optional[int] = int(splats.sh_order)
+    else:
+        # gsplat always adds the SH bias, so evaluate SH manually and pass raw colors.
+        R = view_matrix[:3, :3]
+        t = view_matrix[:3, 3]
+        campos = -(R.transpose(0, 1) @ t)
+        dirs = means - campos
+        coeffs = torch.cat([f_dc, f_rest], dim=1).view(-1, 3, total)
+        colors = eval_sh(splats.sh_order, coeffs, dirs).clamp(0.0, 1.0)
+        sh_degree = None
+
+    fov_rad = math.radians(camera_horizontal_fov)
+    f_px = 0.5 * output_width / math.tan(fov_rad / 2.0)
+    K = torch.tensor(
+        [
+            [f_px, 0.0, output_width / 2.0],
+            [0.0, f_px, output_height / 2.0],
+            [0.0, 0.0, 1.0],
+        ],
+        device=dev,
+        dtype=torch.float32,
+    )
+    renders, alphas, _meta = gsplat.rasterization(
+        means=means,
+        quats=quats,
+        scales=scales,
+        opacities=opacity,
+        colors=colors,
+        viewmats=view_matrix.unsqueeze(0),
+        Ks=K.unsqueeze(0),
+        width=int(output_width),
+        height=int(output_height),
+        sh_degree=sh_degree,
+        render_mode="RGB+ED",
+    )
+    rgb = renders[0, ..., :3].clamp(0.0, 1.0)
+    depth = renders[0, ..., 3]
+    alpha = alphas[0, ..., 0].clamp(0.0, 1.0)
+    # gsplat's "ED" channel is expected z-depth; convert it to RADIAL ray depth
+    # (multiply by the per-pixel ray norm) so the disparity semantics match the
+    # "fast"/"over" backends, which use ||XYZ|| — otherwise render_mode="auto"
+    # silently switches disparity meaning between CPU and CUDA machines.
+    xs = (torch.arange(output_width, device=dev, dtype=torch.float32) + 0.5 - output_width / 2.0) / f_px
+    ys = (torch.arange(output_height, device=dev, dtype=torch.float32) + 0.5 - output_height / 2.0) / f_px
+    ray_norm = torch.sqrt(1.0 + xs.view(1, -1) ** 2 + ys.view(-1, 1) ** 2)
+    depth = depth * ray_norm
+    disparity = torch.where(depth > 1e-6, alpha / depth.clamp(min=1e-6), torch.zeros_like(depth))
+    return rgb.unsqueeze(0), alpha, disparity.unsqueeze(0).unsqueeze(-1)
+
+
+def render_gaussians(
+    splats: "GaussianSplats",
+    camera_matrix,
+    camera_projection: str,
+    camera_horizontal_fov: float,
+    output_width: int,
+    output_height: int,
+    max_splats: int = 0,
+    opacity_is_logit: bool = True,
+    add_sh_bias: bool = True,
+    render_mode: str = "auto",
+    chunk_size: int = 256,
+    max_radius: int = 32,
+    device: str = "auto",
+) -> tuple:
+    """Render Gaussian splats from a world-to-camera 4x4 matrix.
+
+    Returns (image [1,H,W,3] float 0..1, alpha/mask [H,W], disparity [1,H,W,1]).
+    All three outputs are always present, even when no splat is visible.
+
+    render_mode:
+      - "auto": gsplat if importable, running on CUDA and projection is PINHOLE, else "fast".
+      - "gsplat": CUDA gsplat rasterization (PINHOLE only, raises otherwise).
+      - "fast": chunked torch splatting; anisotropic projected 2D covariance for PINHOLE,
+        isotropic approximation for FISHEYE/EQUIRECTANGULAR.
+      - "over": slow per-splat depth-sorted over-compositing (isotropic).
+    """
+    target_device = _resolve_device_choice(device)
+    if splats.xyz.device != target_device:
+        splats = splats.to(target_device)
+    dev = splats.xyz.device
+
+    mode = render_mode
+    if mode == "auto":
+        if (
+            camera_projection == "PINHOLE"
+            and torch.cuda.is_available()
+            and dev.type == "cuda"
+            and _gsplat_available()
+        ):
+            mode = "gsplat"
+        else:
+            mode = "fast"
+    if mode not in ("gsplat", "fast", "over"):
+        raise ValueError(f"Unknown render_mode: {render_mode}")
+
+    if isinstance(camera_matrix, torch.Tensor):
+        M = camera_matrix.to(dev).view(4, 4).float()
+    else:
+        M = torch.tensor(camera_matrix, device=dev, dtype=torch.float32).view(4, 4)
+
+    if mode == "gsplat":
+        if camera_projection != "PINHOLE":
+            raise ValueError(
+                f"render_mode='gsplat' supports only the PINHOLE projection (got {camera_projection}). "
+                "Use render_mode='fast' or 'over' for FISHEYE/EQUIRECTANGULAR."
+            )
+        return _render_gaussians_gsplat(
+            splats,
+            M,
+            camera_horizontal_fov,
+            output_width,
+            output_height,
+            max_splats,
+            opacity_is_logit,
+            add_sh_bias,
+        )
+
+    R = M[:3, :3]
+    t = M[:3, 3]
+
+    coords = splats.xyz @ R.T + t
+    z = coords[:, 2]
+    in_front = z > 1e-6
+    if not in_front.any():
+        return _empty_render(output_width, output_height, dev)
+
+    coords = coords[in_front]
+    f_dc = splats.f_dc[in_front]
+    f_rest = splats.f_rest[in_front]
+    opacity = splats.opacity[in_front].squeeze(-1)
+    scale = splats.scale[in_front]
+    rotation = splats.rotation[in_front]
+
+    if opacity_is_logit:
+        opacity = torch.sigmoid(opacity)
+
+    if max_splats > 0 and coords.shape[0] > max_splats:
+        keep = torch.topk(opacity, k=max_splats).indices
+        coords = coords[keep]
+        f_dc = f_dc[keep]
+        f_rest = f_rest[keep]
+        opacity = opacity[keep]
+        scale = scale[keep]
+        rotation = rotation[keep]
+
+    dirs = _normalize_dirs(coords)
+    total = (splats.sh_order + 1) ** 2
+    expected_rest = (total - 1) * 3
+    if f_rest.shape[1] != expected_rest:
+        raise ValueError(f"Expected f_rest with {expected_rest} channels, got {f_rest.shape[1]}")
+    coeffs = torch.cat([f_dc, f_rest], dim=1).view(-1, 3, total)
+    colors = eval_sh(splats.sh_order, coeffs, dirs)
+    if add_sh_bias:
+        colors = colors + 0.5
+    colors = colors.clamp(0.0, 1.0)
+
+    X, Y, Z = coords.unbind(-1)
+    if camera_projection == "PINHOLE":
+        u, v, depth = _xyz_to_pinhole(X, Y, Z, camera_horizontal_fov)
+    elif camera_projection == "FISHEYE":
+        u, v, depth = _xyz_to_fisheye(X, Y, Z, camera_horizontal_fov)
+    else:
+        u, v, depth = _xyz_to_equirect(X, Y, Z, camera_horizontal_fov)
+
+    valid = (u >= -1.0) & (u <= 1.0) & (v >= -1.0) & (v <= 1.0)
+    if not valid.any():
+        return _empty_render(output_width, output_height, dev)
+
+    coords = coords[valid]
+    u = u[valid]
+    v = v[valid]
+    depth = depth[valid]
+    colors = colors[valid]
+    opacity = opacity[valid]
+    scale = scale[valid]
+    rotation = rotation[valid]
+
+    px = (u * 0.5 + 0.5) * (output_width - 1)
+    py = (v * 0.5 + 0.5) * (output_height - 1)
+
+    fov_rad = math.radians(camera_horizontal_fov)
+    f = 1.0 / math.tan(fov_rad / 2.0)
+    fx = f * (output_width - 1) / 2.0
+    fy = f * (output_height - 1) / 2.0
+    # Legacy isotropic footprint, used by "over" mode and by "fast" for
+    # non-pinhole projections (kept for regression compatibility).
+    scale_mean = scale.mean(dim=1)
+    sigma_x = (scale_mean * fx / depth.clamp(min=1e-6)).clamp(min=0.5, max=512.0)
+    sigma_y = (scale_mean * fy / depth.clamp(min=1e-6)).clamp(min=0.5, max=512.0)
+
+    if mode == "fast":
+        if camera_projection == "PINHOLE":
+            # Anisotropic footprint: project the 3D covariance to the image plane.
+            # Sigma3D = Rq S^2 Rq^T (world frame), rotated into the camera frame by
+            # the view rotation W, then Sigma2D = J W Sigma3D W^T J^T with J the
+            # perspective Jacobian, plus a 0.3px anti-alias blur.
+            Rq = _quats_to_rotation_matrices(rotation)
+            W3 = R.unsqueeze(0) @ Rq
+            s2 = torch.exp(2.0 * scale)
+            cov_cam = (W3 * s2.unsqueeze(1)) @ W3.transpose(1, 2)
+            Xc, Yc, Zc = coords.unbind(-1)
+            zc = Zc.clamp(min=1e-6)
+            j00 = fx / zc
+            j02 = -fx * Xc / (zc * zc)
+            j11 = fy / zc
+            j12 = -fy * Yc / (zc * zc)
+            c00 = cov_cam[:, 0, 0]
+            c01 = cov_cam[:, 0, 1]
+            c02 = cov_cam[:, 0, 2]
+            c11 = cov_cam[:, 1, 1]
+            c12 = cov_cam[:, 1, 2]
+            c22 = cov_cam[:, 2, 2]
+            cov_a = j00 * j00 * c00 + 2.0 * j00 * j02 * c02 + j02 * j02 * c22
+            cov_b = j00 * j11 * c01 + j00 * j12 * c02 + j02 * j11 * c12 + j02 * j12 * c22
+            cov_c = j11 * j11 * c11 + 2.0 * j11 * j12 * c12 + j12 * j12 * c22
+            # 0.3px low-pass blur and stability clamps (match the legacy sigma clamps).
+            cov_a = (cov_a + 0.3).clamp(min=0.25, max=512.0 ** 2)
+            cov_c = (cov_c + 0.3).clamp(min=0.25, max=512.0 ** 2)
+            b_max = 0.99 * torch.sqrt(cov_a * cov_c)
+            cov_b = torch.maximum(torch.minimum(cov_b, b_max), -b_max)
+            det = (cov_a * cov_c - cov_b * cov_b).clamp(min=1e-8)
+            conic_a = cov_c / det
+            conic_b = -cov_b / det
+            conic_c = cov_a / det
+            rad_x_f = 3.0 * torch.sqrt(cov_a)
+            rad_y_f = 3.0 * torch.sqrt(cov_c)
+        else:
+            # FISHEYE / EQUIRECTANGULAR: the pixel-space Jacobian of these
+            # projections is strongly nonlinear and direction dependent (it
+            # degenerates near the poles / image border), so we keep the legacy
+            # isotropic approximation (mean scale / depth) instead of a
+            # projected 2D covariance.
+            conic_a = 1.0 / (sigma_x * sigma_x)
+            conic_b = torch.zeros_like(sigma_x)
+            conic_c = 1.0 / (sigma_y * sigma_y)
+            rad_x_f = 3.0 * sigma_x
+            rad_y_f = 3.0 * sigma_y
+
+        max_radius = max(1, int(max_radius))
+        chunk_size = max(1, int(chunk_size))
+        total_px = output_height * output_width
+        alpha_sum = torch.zeros((total_px,), device=dev)
+        color_sum = torch.zeros((total_px, 3), device=dev)
+        depth_sum = torch.zeros((total_px,), device=dev)
+        n_splats = px.shape[0]
+        rad_x_all = torch.ceil(rad_x_f).detach().to(torch.int64).clamp(min=1, max=max_radius)
+        rad_y_all = torch.ceil(rad_y_f).detach().to(torch.int64).clamp(min=1, max=max_radius)
+
+        def _splat_chunk(px_c, py_c, conic_a_c, conic_b_c, conic_c_c, opacity_c, colors_c, depth_c, rad_x, rad_y):
+            """One chunk's scatter contributions: (idx, alpha, color, depth) flats."""
+            conic_a_c = conic_a_c.view(-1, 1, 1)
+            conic_b_c = conic_b_c.view(-1, 1, 1)
+            conic_c_c = conic_c_c.view(-1, 1, 1)
+            opacity_c = opacity_c.clamp(0.0, 1.0)
+            max_rx = int(rad_x.max().detach().cpu().item())
+            max_ry = int(rad_y.max().detach().cpu().item())
+            empty = (
+                torch.zeros((0,), device=dev, dtype=torch.int64),
+                torch.zeros((0,), device=dev),
+                torch.zeros((0, 3), device=dev),
+                torch.zeros((0,), device=dev),
+            )
+            if max_rx <= 0 or max_ry <= 0:
+                return empty
+
+            # Window [floor(px - rad), floor(px - rad) + 2*max_r] covers the full
+            # [px - rad, px + rad] footprint of every splat in the chunk. (The
+            # previous arange(-max_r, max_r+1) offset from the left edge cut off
+            # the right/bottom half of each footprint.)
+            grid_x = torch.arange(0, 2 * max_rx + 1, device=dev)
+            grid_y = torch.arange(0, 2 * max_ry + 1, device=dev)
+            x0 = torch.floor(px_c.detach() - rad_x.float()).view(-1, 1, 1)
+            y0 = torch.floor(py_c.detach() - rad_y.float()).view(-1, 1, 1)
+
+            xs = x0 + grid_x.view(1, 1, -1)
+            ys = y0 + grid_y.view(1, -1, 1)
+
+            dx = xs - px_c.view(-1, 1, 1)
+            dy = ys - py_c.view(-1, 1, 1)
+            quad = conic_a_c * dx * dx + 2.0 * conic_b_c * dx * dy + conic_c_c * dy * dy
+            weight = torch.exp(-0.5 * quad)
+
+            xs_int = xs.to(torch.int64)
+            ys_int = ys.to(torch.int64)
+            valid_px = (
+                (xs_int >= 0)
+                & (xs_int < output_width)
+                & (ys_int >= 0)
+                & (ys_int < output_height)
+                & (quad.detach() <= 9.0)
+            )
+
+            alpha = opacity_c.view(-1, 1, 1) * weight
+            alpha = alpha * valid_px
+            valid_flat = valid_px.expand(alpha.shape).reshape(-1)
+            if not valid_flat.any():
+                return empty
+
+            idx = (ys_int * output_width + xs_int).expand(alpha.shape).reshape(-1)[valid_flat]
+            alpha_flat = alpha.reshape(-1)[valid_flat]
+            color_flat = (alpha.unsqueeze(-1) * colors_c.view(-1, 1, 1, 3)).reshape(-1, 3)[valid_flat]
+            depth_flat = (alpha * depth_c.view(-1, 1, 1)).reshape(-1)[valid_flat]
+            return idx, alpha_flat, color_flat, depth_flat
+
+        # When gradients are required (e.g. SplatPolish's torch fallback),
+        # gradient-checkpoint each chunk: otherwise autograd retains every
+        # chunk's [chunk, 2r+1, 2r+1] intermediates (exp weights, alpha, color
+        # products, ...) until backward, and memory scales with
+        # n_splats x footprint — OOM at realistic splat counts. Checkpointing
+        # recomputes the chunk during backward instead.
+        needs_grad = torch.is_grad_enabled() and any(
+            t.requires_grad for t in (px, py, conic_a, conic_b, conic_c, opacity, colors, depth)
+        )
+        if needs_grad:
+            from torch.utils.checkpoint import checkpoint as _torch_checkpoint
+
+        for start in range(0, n_splats, chunk_size):
+            end = min(n_splats, start + chunk_size)
+            chunk_args = (
+                px[start:end],
+                py[start:end],
+                conic_a[start:end],
+                conic_b[start:end],
+                conic_c[start:end],
+                opacity[start:end],
+                colors[start:end],
+                depth[start:end],
+                rad_x_all[start:end],
+                rad_y_all[start:end],
+            )
+            if needs_grad:
+                idx, alpha_flat, color_flat, depth_flat = _torch_checkpoint(
+                    _splat_chunk, *chunk_args, use_reentrant=False
+                )
+            else:
+                idx, alpha_flat, color_flat, depth_flat = _splat_chunk(*chunk_args)
+            if idx.numel() == 0:
+                continue
+
+            alpha_sum.scatter_add_(0, idx, alpha_flat)
+            color_sum.scatter_add_(0, idx.unsqueeze(-1).expand(-1, 3), color_flat)
+            depth_sum.scatter_add_(0, idx, depth_flat)
+
+        alpha_img = alpha_sum.view(output_height, output_width).clamp(max=1.0)
+        color_img = color_sum.view(output_height, output_width, 3) / alpha_sum.view(output_height, output_width, 1).clamp(min=1e-6)
+        depth_img = depth_sum.view(output_height, output_width) / alpha_sum.view(output_height, output_width).clamp(min=1e-6)
+        disparity = (1.0 / depth_img.clamp(min=1e-6)) * alpha_img
+        disparity = disparity.unsqueeze(0).unsqueeze(-1)
+        return color_img.unsqueeze(0), alpha_img, disparity
+
+    order = torch.argsort(depth)
+    order_cpu = order.detach().cpu().tolist()
+    px_cpu = px.detach().cpu().numpy()
+    py_cpu = py.detach().cpu().numpy()
+    sx_cpu = sigma_x.detach().cpu().numpy()
+    sy_cpu = sigma_y.detach().cpu().numpy()
+
+    img = torch.zeros((output_height, output_width, 3), device=dev)
+    alpha_img = torch.zeros((output_height, output_width), device=dev)
+    depth_acc = torch.zeros((output_height, output_width), device=dev)
+
+    for idx in order_cpu:
+        cx = float(px_cpu[idx])
+        cy = float(py_cpu[idx])
+        sx = float(sx_cpu[idx])
+        sy = float(sy_cpu[idx])
+        if sx <= 0.0 or sy <= 0.0:
+            continue
+        radius_x = int(math.ceil(3.0 * sx))
+        radius_y = int(math.ceil(3.0 * sy))
+        x0 = max(0, int(math.floor(cx - radius_x)))
+        x1 = min(output_width - 1, int(math.ceil(cx + radius_x)))
+        y0 = max(0, int(math.floor(cy - radius_y)))
+        y1 = min(output_height - 1, int(math.ceil(cy + radius_y)))
+        if x1 < x0 or y1 < y0:
+            continue
+
+        xs = torch.arange(x0, x1 + 1, device=dev)
+        ys = torch.arange(y0, y1 + 1, device=dev)
+        yy, xx = torch.meshgrid(ys, xs, indexing="ij")
+        dx = (xx - cx) / sx
+        dy = (yy - cy) / sy
+        weight = torch.exp(-0.5 * (dx * dx + dy * dy))
+        alpha = opacity[idx].clamp(0.0, 1.0) * weight
+        if alpha.max() <= 0.0:
+            continue
+        sub_alpha = alpha_img[y0 : y1 + 1, x0 : x1 + 1]
+        trans = 1.0 - sub_alpha
+        alpha = alpha.clamp(0.0, 1.0)
+        sub_color = img[y0 : y1 + 1, x0 : x1 + 1]
+        sub_color = sub_color + trans.unsqueeze(-1) * alpha.unsqueeze(-1) * colors[idx]
+        sub_alpha = sub_alpha + trans * alpha
+        sub_depth = depth_acc[y0 : y1 + 1, x0 : x1 + 1]
+        sub_depth = sub_depth + trans * alpha * depth[idx]
+        img[y0 : y1 + 1, x0 : x1 + 1] = sub_color
+        alpha_img[y0 : y1 + 1, x0 : x1 + 1] = sub_alpha
+        depth_acc[y0 : y1 + 1, x0 : x1 + 1] = sub_depth
+
+    depth_img = depth_acc / alpha_img.clamp(min=1e-6)
+    disparity = (1.0 / depth_img.clamp(min=1e-6)) * alpha_img
+    disparity = disparity.unsqueeze(0).unsqueeze(-1)
+    return img.unsqueeze(0), alpha_img, disparity
 
 
 class LoadPlySplat:
@@ -1149,7 +1841,13 @@ class FisheyeToGaussian:
                 splats = splat_cloud_rotation(splats, transform)
             splats_list.append(splats)
 
-        merged = _stitch_splats(splats_list, stitch_mode, stitch_voxel_size, stitch_direction_deg)
+        merged = _stitch_splats(
+            splats_list,
+            stitch_mode,
+            stitch_voxel_size,
+            stitch_direction_deg,
+            pinhole_horizontal_fov,
+        )
         return (merged,)
 
 
@@ -1239,10 +1937,10 @@ class RenderSplat:
                 "camera_horizontal_fov": ("FLOAT", {"default": 90.0}),
                 "output_width": ("INT", {"default": 512, "min": 8, "max": 16384}),
                 "output_height": ("INT", {"default": 512, "min": 8, "max": 16384}),
-                "max_splats": ("INT", {"default": 20000, "min": 0, "max": 1000000}),
+                "max_splats": ("INT", {"default": 0, "min": 0, "max": 1000000, "tooltip": "Keep only the N most opaque splats. 0 = unlimited."}),
                 "opacity_is_logit": ("BOOLEAN", {"default": True}),
                 "add_sh_bias": ("BOOLEAN", {"default": True}),
-                "render_mode": (RENDER_MODES, {"default": "fast"}),
+                "render_mode": (RENDER_MODES_ALL, {"default": "auto", "tooltip": "auto = gsplat when available (CUDA + PINHOLE), otherwise the torch 'fast' splatter."}),
                 "chunk_size": ("INT", {"default": 256, "min": 1, "max": 4096}),
                 "max_radius": ("INT", {"default": 32, "min": 1, "max": 512}),
             },
@@ -1267,212 +1965,26 @@ class RenderSplat:
         max_splats: int,
         opacity_is_logit: bool,
         add_sh_bias: bool = True,
-        render_mode: str = "fast",
+        render_mode: str = "auto",
         chunk_size: int = 256,
         max_radius: int = 32,
         device: str = "auto",
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        target_device = _resolve_device_choice(device)
-        if splats.xyz.device != target_device:
-            splats = splats.to(target_device)
-        device = splats.xyz.device
-        if isinstance(camera_matrix, torch.Tensor):
-            M = camera_matrix.to(device).view(4, 4).float()
-        else:
-            M = torch.tensor(camera_matrix, device=device, dtype=torch.float32).view(4, 4)
-        R = M[:3, :3]
-        t = M[:3, 3]
-
-        coords = splats.xyz @ R.T + t
-        z = coords[:, 2]
-        in_front = z > 1e-6
-        if not in_front.any():
-            img = torch.zeros((1, output_height, output_width, 3), device=device)
-            mask = torch.zeros((output_height, output_width), device=device)
-            return img, mask
-
-        coords = coords[in_front]
-        f_dc = splats.f_dc[in_front]
-        f_rest = splats.f_rest[in_front]
-        opacity = splats.opacity[in_front].squeeze(-1)
-        scale = splats.scale[in_front]
-
-        if opacity_is_logit:
-            opacity = torch.sigmoid(opacity)
-
-        if max_splats > 0 and coords.shape[0] > max_splats:
-            keep = torch.topk(opacity, k=max_splats).indices
-            coords = coords[keep]
-            f_dc = f_dc[keep]
-            f_rest = f_rest[keep]
-            opacity = opacity[keep]
-            scale = scale[keep]
-
-        dirs = _normalize_dirs(coords)
-        total = (splats.sh_order + 1) ** 2
-        expected_rest = (total - 1) * 3
-        if f_rest.shape[1] != expected_rest:
-            raise ValueError(f"Expected f_rest with {expected_rest} channels, got {f_rest.shape[1]}")
-        coeffs = torch.cat([f_dc, f_rest], dim=1).view(-1, 3, total)
-        colors = eval_sh(splats.sh_order, coeffs, dirs)
-        if add_sh_bias:
-            colors = colors + 0.5
-        colors = colors.clamp(0.0, 1.0)
-
-        X, Y, Z = coords.unbind(-1)
-        if camera_projection == "PINHOLE":
-            u, v, depth = _xyz_to_pinhole(X, Y, Z, camera_horizontal_fov)
-        elif camera_projection == "FISHEYE":
-            u, v, depth = _xyz_to_fisheye(X, Y, Z, camera_horizontal_fov)
-        else:
-            u, v, depth = _xyz_to_equirect(X, Y, Z, camera_horizontal_fov)
-
-        valid = (u >= -1.0) & (u <= 1.0) & (v >= -1.0) & (v <= 1.0)
-        if not valid.any():
-            img = torch.zeros((1, output_height, output_width, 3), device=device)
-            mask = torch.zeros((output_height, output_width), device=device)
-            return img, mask
-
-        u = u[valid]
-        v = v[valid]
-        depth = depth[valid]
-        colors = colors[valid]
-        opacity = opacity[valid]
-        scale = scale[valid]
-
-        px = (u * 0.5 + 0.5) * (output_width - 1)
-        py = (v * 0.5 + 0.5) * (output_height - 1)
-
-        fov_rad = math.radians(camera_horizontal_fov)
-        f = 1.0 / math.tan(fov_rad / 2.0)
-        fx = f * (output_width - 1) / 2.0
-        fy = f * (output_height - 1) / 2.0
-        scale_mean = scale.mean(dim=1)
-        sigma_x = (scale_mean * fx / depth.clamp(min=1e-6)).clamp(min=0.5, max=512.0)
-        sigma_y = (scale_mean * fy / depth.clamp(min=1e-6)).clamp(min=0.5, max=512.0)
-
-        if render_mode == "fast":
-            max_radius = max(1, int(max_radius))
-            chunk_size = max(1, int(chunk_size))
-            total_px = output_height * output_width
-            alpha_sum = torch.zeros((total_px,), device=device)
-            color_sum = torch.zeros((total_px, 3), device=device)
-            depth_sum = torch.zeros((total_px,), device=device)
-            n_splats = px.shape[0]
-            for start in range(0, n_splats, chunk_size):
-                end = min(n_splats, start + chunk_size)
-                px_c = px[start:end]
-                py_c = py[start:end]
-                sx_c = sigma_x[start:end].clamp(min=1e-4)
-                sy_c = sigma_y[start:end].clamp(min=1e-4)
-                opacity_c = opacity[start:end].clamp(0.0, 1.0)
-                colors_c = colors[start:end]
-                depth_c = depth[start:end]
-
-                rad_x = torch.ceil(3.0 * sx_c).to(torch.int64).clamp(min=1, max=max_radius)
-                rad_y = torch.ceil(3.0 * sy_c).to(torch.int64).clamp(min=1, max=max_radius)
-                max_rx = int(rad_x.max().detach().cpu().item())
-                max_ry = int(rad_y.max().detach().cpu().item())
-                if max_rx <= 0 or max_ry <= 0:
-                    continue
-
-                grid_x = torch.arange(-max_rx, max_rx + 1, device=device)
-                grid_y = torch.arange(-max_ry, max_ry + 1, device=device)
-                x0 = torch.floor(px_c - rad_x.float()).view(-1, 1, 1)
-                y0 = torch.floor(py_c - rad_y.float()).view(-1, 1, 1)
-
-                xs = x0 + grid_x.view(1, 1, -1)
-                ys = y0 + grid_y.view(1, -1, 1)
-
-                dx = (xs - px_c.view(-1, 1, 1)) / sx_c.view(-1, 1, 1)
-                dy = (ys - py_c.view(-1, 1, 1)) / sy_c.view(-1, 1, 1)
-                weight = torch.exp(-0.5 * (dx * dx + dy * dy))
-
-                xs_int = xs.to(torch.int64)
-                ys_int = ys.to(torch.int64)
-                valid = (
-                    (xs_int >= 0)
-                    & (xs_int < output_width)
-                    & (ys_int >= 0)
-                    & (ys_int < output_height)
-                    & (dx.abs() <= 3.0)
-                    & (dy.abs() <= 3.0)
-                )
-
-                alpha = opacity_c.view(-1, 1, 1) * weight
-                alpha = alpha * valid
-                valid_flat = valid.view(-1)
-                if not valid_flat.any():
-                    continue
-
-                idx = (ys_int * output_width + xs_int).view(-1)[valid_flat]
-                alpha_flat = alpha.view(-1)[valid_flat]
-                color_flat = (alpha.unsqueeze(-1) * colors_c.view(-1, 1, 1, 3)).view(-1, 3)[valid_flat]
-                depth_flat = (alpha * depth_c.view(-1, 1, 1)).view(-1)[valid_flat]
-
-                alpha_sum.scatter_add_(0, idx, alpha_flat)
-                color_sum.scatter_add_(0, idx.unsqueeze(-1).expand(-1, 3), color_flat)
-                depth_sum.scatter_add_(0, idx, depth_flat)
-
-            alpha_img = alpha_sum.view(output_height, output_width).clamp(max=1.0)
-            color_img = color_sum.view(output_height, output_width, 3) / alpha_sum.view(output_height, output_width, 1).clamp(min=1e-6)
-            depth_img = depth_sum.view(output_height, output_width) / alpha_sum.view(output_height, output_width).clamp(min=1e-6)
-            disparity = (1.0 / depth_img.clamp(min=1e-6)) * alpha_img
-            disparity = disparity.unsqueeze(0).unsqueeze(-1)
-            return color_img.unsqueeze(0), alpha_img, disparity
-
-        order = torch.argsort(depth)
-        order_cpu = order.detach().cpu().tolist()
-        px_cpu = px.detach().cpu().numpy()
-        py_cpu = py.detach().cpu().numpy()
-        sx_cpu = sigma_x.detach().cpu().numpy()
-        sy_cpu = sigma_y.detach().cpu().numpy()
-
-        img = torch.zeros((output_height, output_width, 3), device=device)
-        alpha_img = torch.zeros((output_height, output_width), device=device)
-        depth_acc = torch.zeros((output_height, output_width), device=device)
-
-        for idx in order_cpu:
-            cx = float(px_cpu[idx])
-            cy = float(py_cpu[idx])
-            sx = float(sx_cpu[idx])
-            sy = float(sy_cpu[idx])
-            if sx <= 0.0 or sy <= 0.0:
-                continue
-            radius_x = int(math.ceil(3.0 * sx))
-            radius_y = int(math.ceil(3.0 * sy))
-            x0 = max(0, int(math.floor(cx - radius_x)))
-            x1 = min(output_width - 1, int(math.ceil(cx + radius_x)))
-            y0 = max(0, int(math.floor(cy - radius_y)))
-            y1 = min(output_height - 1, int(math.ceil(cy + radius_y)))
-            if x1 < x0 or y1 < y0:
-                continue
-
-            xs = torch.arange(x0, x1 + 1, device=device)
-            ys = torch.arange(y0, y1 + 1, device=device)
-            yy, xx = torch.meshgrid(ys, xs, indexing="ij")
-            dx = (xx - cx) / sx
-            dy = (yy - cy) / sy
-            weight = torch.exp(-0.5 * (dx * dx + dy * dy))
-            alpha = opacity[idx].clamp(0.0, 1.0) * weight
-            if alpha.max() <= 0.0:
-                continue
-            sub_alpha = alpha_img[y0 : y1 + 1, x0 : x1 + 1]
-            trans = 1.0 - sub_alpha
-            alpha = alpha.clamp(0.0, 1.0)
-            sub_color = img[y0 : y1 + 1, x0 : x1 + 1]
-            sub_color = sub_color + trans.unsqueeze(-1) * alpha.unsqueeze(-1) * colors[idx]
-            sub_alpha = sub_alpha + trans * alpha
-            sub_depth = depth_acc[y0 : y1 + 1, x0 : x1 + 1]
-            sub_depth = sub_depth + trans * alpha * depth[idx]
-            img[y0 : y1 + 1, x0 : x1 + 1] = sub_color
-            alpha_img[y0 : y1 + 1, x0 : x1 + 1] = sub_alpha
-            depth_acc[y0 : y1 + 1, x0 : x1 + 1] = sub_depth
-
-        depth_img = depth_acc / alpha_img.clamp(min=1e-6)
-        disparity = (1.0 / depth_img.clamp(min=1e-6)) * alpha_img
-        disparity = disparity.unsqueeze(0).unsqueeze(-1)
-        return img.unsqueeze(0), alpha_img, disparity
+        return render_gaussians(
+            splats,
+            camera_matrix,
+            camera_projection,
+            camera_horizontal_fov,
+            output_width,
+            output_height,
+            max_splats=max_splats,
+            opacity_is_logit=opacity_is_logit,
+            add_sh_bias=add_sh_bias,
+            render_mode=render_mode,
+            chunk_size=chunk_size,
+            max_radius=max_radius,
+            device=device,
+        )
 
 
 class SavePlySplat:
@@ -1531,6 +2043,448 @@ class SavePlySplat:
         }
 
 
+class FuseSplats:
+    @classmethod
+    def INPUT_TYPES(cls) -> Dict[str, Any]:
+        return {
+            "required": {
+                "splats_a": ("GSPLAT",),
+                "splats_b": ("GSPLAT",),
+                "voxel_size": (
+                    "FLOAT",
+                    {
+                        "default": 0.01,
+                        "min": 0.0,
+                        "max": 10.0,
+                        "step": 0.001,
+                        "tooltip": "Voxel edge length used to merge overlapping splats. 0 disables voxel merging.",
+                    },
+                ),
+                "mode": (FUSE_MODES, {"default": "smart"}),
+                "weight_a": (
+                    "FLOAT",
+                    {
+                        "default": 1.0,
+                        "min": 0.0,
+                        "max": 1000.0,
+                        "tooltip": "Confidence/recency weight for splats_a (used by smart/average modes).",
+                    },
+                ),
+                "weight_b": (
+                    "FLOAT",
+                    {
+                        "default": 1.0,
+                        "min": 0.0,
+                        "max": 1000.0,
+                        "tooltip": "Confidence/recency weight for splats_b (used by smart/average modes).",
+                    },
+                ),
+            },
+            "optional": {
+                "device": (DEVICE_CHOICES, {"default": "auto"}),
+            },
+        }
+
+    RETURN_TYPES = ("GSPLAT",)
+    RETURN_NAMES = ("fused_splats",)
+    FUNCTION = "fuse_splats"
+    CATEGORY = "Camera/GSplat"
+    DESCRIPTION = "Fuses two splat clouds with weighted voxel merging (weights bias the per-voxel reduction)."
+
+    def fuse_splats(
+        self,
+        splats_a: GaussianSplats,
+        splats_b: GaussianSplats,
+        voxel_size: float,
+        mode: str,
+        weight_a: float,
+        weight_b: float,
+        device: str = "auto",
+    ):
+        if splats_a.f_rest.shape[1] != splats_b.f_rest.shape[1] or splats_a.sh_order != splats_b.sh_order:
+            raise ValueError(
+                f"Splats must share the same SH order and f_rest size (got {splats_a.sh_order}/{splats_a.f_rest.shape[1]} vs "
+                f"{splats_b.sh_order}/{splats_b.f_rest.shape[1]})."
+            )
+        if device == "auto":
+            if splats_a.xyz.device == splats_b.xyz.device:
+                target_device = splats_a.xyz.device
+            else:
+                target_device = _resolve_device_choice("auto")
+        else:
+            target_device = _resolve_device_choice(device)
+        dtype = torch.promote_types(splats_a.xyz.dtype, splats_b.xyz.dtype)
+        a = _coerce_splats(splats_a, target_device, dtype)
+        b = _coerce_splats(splats_b, target_device, dtype)
+        fused = _stitch_splats(
+            [a, b],
+            mode,
+            voxel_size,
+            5.0,
+            weights_list=[float(weight_a), float(weight_b)],
+        )
+        return (fused,)
+
+
+class VideoToFusedSplats:
+    @classmethod
+    def INPUT_TYPES(cls) -> Dict[str, Any]:
+        choices = _list_sharp_checkpoint_choices()
+        return {
+            "required": {
+                "frames": ("IMAGE", {"tooltip": "Video frames [T,H,W,3]."}),
+                "trajectory": (
+                    "TENSOR",
+                    {"tooltip": "[T,4,4] world-to-camera matrix per frame (a single [4,4] is broadcast)."},
+                ),
+                "horizontal_fov": ("FLOAT", {"default": 60.0, "min": 1.0, "max": 179.0}),
+                "checkpoint": (
+                    choices,
+                    {
+                        "default": _SHARP_DEFAULT_CHECKPOINT_LABEL,
+                        "file_chooser": True,
+                        "tooltip": "SHARP .pt checkpoint from the input folder, or download the default model.",
+                    },
+                ),
+                "keyframe_stride": (
+                    "INT",
+                    {"default": 8, "min": 1, "max": 1000, "tooltip": "Run SHARP on every Nth frame."},
+                ),
+                "stitch_voxel_size": ("FLOAT", {"default": 0.01, "min": 0.0, "max": 10.0, "step": 0.001}),
+                "stitch_mode": (FUSE_MODES, {"default": "smart"}),
+            },
+            "optional": {
+                "static_mask": (
+                    "MASK",
+                    {"tooltip": "[T,H,W], 1 = static/keep pixel. Splats whose source pixel has mask < 0.5 are dropped."},
+                ),
+                "depths": (
+                    "TENSOR",
+                    {"tooltip": "[T,H,W] metric depths. SHARP splats are scale-aligned per keyframe via a robust median disparity ratio."},
+                ),
+                "device": (DEVICE_CHOICES, {"default": "auto"}),
+            },
+        }
+
+    RETURN_TYPES = ("GSPLAT",)
+    RETURN_NAMES = ("splats",)
+    FUNCTION = "video_to_fused_splats"
+    CATEGORY = "Camera/GSplat"
+    DESCRIPTION = (
+        "Runs SHARP on video keyframes, optionally scale-aligns to metric depth and filters dynamic pixels, "
+        "transforms each keyframe splat cloud to the world frame via the inverse camera pose, and fuses everything "
+        "incrementally into a single world-frame splat cloud."
+    )
+
+    @torch.no_grad()
+    def video_to_fused_splats(
+        self,
+        frames: torch.Tensor,
+        trajectory,
+        horizontal_fov: float,
+        checkpoint: str,
+        keyframe_stride: int = 8,
+        stitch_voxel_size: float = 0.01,
+        stitch_mode: str = "smart",
+        static_mask: Optional[torch.Tensor] = None,
+        depths: Optional[torch.Tensor] = None,
+        device: str = "auto",
+    ):
+        _ensure_sharp_available()
+        target_device = _resolve_device_choice(device)
+        if frames.dim() == 3:
+            frames = frames.unsqueeze(0)
+        if frames.dim() != 4:
+            raise ValueError("frames must be an IMAGE tensor [T,H,W,C].")
+        num_frames = int(frames.shape[0])
+        height = int(frames.shape[1])
+        width = int(frames.shape[2])
+        traj = _coerce_trajectory(trajectory, num_frames, target_device)
+        depth_seq = _normalize_map_sequence(depths, num_frames, "depths") if depths is not None else None
+        mask_seq = _normalize_map_sequence(static_mask, num_frames, "static_mask") if static_mask is not None else None
+
+        keyframes = list(range(0, num_frames, max(1, int(keyframe_stride))))
+        image_to_splat = ImageToSplat()
+        keyframe_clouds: List[GaussianSplats] = []
+        for i in _progress(keyframes, desc="VideoToFusedSplats"):
+            splats, = image_to_splat.image_to_splat(frames[i : i + 1], horizontal_fov, checkpoint, device)
+            if splats.xyz.device != target_device:
+                splats = splats.to(target_device)
+            if len(splats) == 0:
+                continue
+
+            if depth_seq is not None:
+                depth_i = depth_seq[i if depth_seq.shape[0] > 1 else 0].to(target_device)
+                px, py, z, ok = _project_splats_to_pixels(splats.xyz, horizontal_fov, width, height)
+                d_ref = _sample_map_at_pixels(depth_i, px, py, width, height)
+                ok = ok & (d_ref > 1e-6) & (z > 1e-6)
+                if ok.any():
+                    # Robust scale in the disparity domain:
+                    # median((1/z_sharp) / (1/d_ref)) == median(d_ref / z_sharp).
+                    s = torch.median(d_ref[ok] / z[ok])
+                    if torch.isfinite(s) and float(s) > 1e-6:
+                        splats = GaussianSplats(
+                            xyz=splats.xyz * s,
+                            scale=splats.scale + torch.log(s),
+                            rotation=splats.rotation,
+                            opacity=splats.opacity,
+                            f_dc=splats.f_dc,
+                            f_rest=splats.f_rest,
+                            sh_order=splats.sh_order,
+                        )
+
+            if mask_seq is not None:
+                mask_i = mask_seq[i if mask_seq.shape[0] > 1 else 0].to(target_device)
+                px, py, _z, ok = _project_splats_to_pixels(splats.xyz, horizontal_fov, width, height)
+                mask_values = _sample_map_at_pixels(mask_i, px, py, width, height)
+                drop = ok & (mask_values < 0.5)
+                splats = splats[~drop]
+                if len(splats) == 0:
+                    continue
+
+            # trajectory is world-to-camera; the splats live in the camera frame,
+            # so camera-to-world = inverse(pose) brings them into the world frame.
+            cam_to_world = torch.linalg.inv(traj[i])
+            splats_world = splat_cloud_rotation(splats, cam_to_world)
+            keyframe_clouds.append(splats_world)
+        if not keyframe_clouds:
+            raise ValueError("No splats were produced from the provided frames.")
+        # Fuse with a SINGLE voxel reduce over all keyframe clouds. Re-stitching
+        # the whole accumulated cloud on every keyframe (the previous approach)
+        # is O(keyframes x N) work and peak memory: each iteration re-copied and
+        # re-unique-sorted the entire accumulated cloud, ballooning runtime and
+        # OOMing on long clips.
+        if len(keyframe_clouds) == 1:
+            accumulated = keyframe_clouds[0]
+        else:
+            accumulated = _stitch_splats(
+                keyframe_clouds,
+                stitch_mode,
+                stitch_voxel_size,
+                5.0,
+            )
+        return (accumulated,)
+
+
+class SplatPolish:
+    @classmethod
+    def INPUT_TYPES(cls) -> Dict[str, Any]:
+        return {
+            "required": {
+                "splats": ("GSPLAT",),
+                "frames": ("IMAGE", {"tooltip": "Ground-truth frames [T,H,W,3]."}),
+                "trajectory": ("TENSOR", {"tooltip": "[T,4,4] world-to-camera matrix per frame."}),
+                "horizontal_fov": ("FLOAT", {"default": 60.0, "min": 1.0, "max": 179.0}),
+                "iterations": ("INT", {"default": 300, "min": 1, "max": 100000}),
+                "lr_xyz": ("FLOAT", {"default": 1.6e-4, "min": 0.0, "max": 1.0, "step": 0.00001}),
+                "lr_rest": (
+                    "FLOAT",
+                    {
+                        "default": 2.5e-3,
+                        "min": 0.0,
+                        "max": 1.0,
+                        "step": 0.0001,
+                        "tooltip": "Base learning rate for non-position parameters (3DGS-style ratios applied per group).",
+                    },
+                ),
+                "lambda_l1": ("FLOAT", {"default": 0.8, "min": 0.0, "max": 10.0}),
+                "lambda_dssim": ("FLOAT", {"default": 0.2, "min": 0.0, "max": 10.0}),
+                "opacity_reg": ("FLOAT", {"default": 0.01, "min": 0.0, "max": 1.0}),
+                "allow_torch_fallback": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": "Without gsplat+CUDA, optimize through the differentiable torch renderer at reduced resolution. EXTREMELY slow; expect minutes per 100 iterations.",
+                    },
+                ),
+            },
+            "optional": {
+                "device": (DEVICE_CHOICES, {"default": "auto"}),
+            },
+        }
+
+    RETURN_TYPES = ("GSPLAT",)
+    RETURN_NAMES = ("polished_splats",)
+    FUNCTION = "polish_splats"
+    CATEGORY = "Camera/GSplat"
+    DESCRIPTION = (
+        "Optimizes an existing world-frame splat cloud against posed video frames "
+        "(L1 + D-SSIM photometric loss) using gsplat's differentiable rasterizer."
+    )
+
+    def polish_splats(
+        self,
+        splats: GaussianSplats,
+        frames: torch.Tensor,
+        trajectory,
+        horizontal_fov: float,
+        iterations: int,
+        lr_xyz: float,
+        lr_rest: float,
+        lambda_l1: float,
+        lambda_dssim: float,
+        opacity_reg: float,
+        allow_torch_fallback: bool = False,
+        device: str = "auto",
+    ):
+        target_device = _resolve_device_choice(device)
+        use_gsplat = (
+            target_device.type == "cuda"
+            and torch.cuda.is_available()
+            and _gsplat_available()
+        )
+        if not use_gsplat and not allow_torch_fallback:
+            raise RuntimeError(
+                "SplatPolish requires gsplat with CUDA (install with: pip install gsplat). "
+                "Alternatively enable allow_torch_fallback to optimize through the pure-torch "
+                "renderer at reduced resolution (extremely slow)."
+            )
+
+        if frames.dim() == 3:
+            frames = frames.unsqueeze(0)
+        if frames.dim() != 4:
+            raise ValueError("frames must be an IMAGE tensor [T,H,W,C].")
+        frames = frames[..., :3].float()
+        num_frames = int(frames.shape[0])
+        frame_h = int(frames.shape[1])
+        frame_w = int(frames.shape[2])
+        traj = _coerce_trajectory(trajectory, num_frames, target_device)
+
+        render_w, render_h = frame_w, frame_h
+        if not use_gsplat:
+            # The torch fallback renderer is O(pixels x splats); shrink the target.
+            max_dim = 256
+            scale_factor = min(1.0, max_dim / max(frame_w, frame_h))
+            render_w = max(8, int(round(frame_w * scale_factor)))
+            render_h = max(8, int(round(frame_h * scale_factor)))
+        if (render_w, render_h) != (frame_w, frame_h):
+            frames_chw = frames.permute(0, 3, 1, 2)
+            frames_chw = F.interpolate(frames_chw, size=(render_h, render_w), mode="bilinear", align_corners=False)
+            frames = frames_chw.permute(0, 2, 3, 1).contiguous()
+        # Keep the ground-truth frames where they arrived (normally CPU): each
+        # iteration samples a single random frame, so only that frame is moved
+        # to the target device. Uploading the whole clip up front would pin
+        # ~T*H*W*3*4 bytes of VRAM (about 5GB for 200 frames at 1080p) on top
+        # of the rasterization buffers and optimizer state.
+        frames = frames.contiguous()
+
+        base = splats.to(target_device)
+        xyz = base.xyz.detach().clone().float().requires_grad_(True)
+        scale = base.scale.detach().clone().float().requires_grad_(True)
+        rotation = base.rotation.detach().clone().float().requires_grad_(True)
+        opacity = base.opacity.detach().clone().float().requires_grad_(True)
+        f_dc = base.f_dc.detach().clone().float().requires_grad_(True)
+        has_rest = base.f_rest.shape[1] > 0
+        f_rest = base.f_rest.detach().clone().float()
+        if has_rest:
+            f_rest.requires_grad_(True)
+
+        # Learning-rate ratios follow the standard 3DGS recipe, scaled by lr_rest.
+        param_groups = [
+            {"params": [xyz], "lr": lr_xyz},
+            {"params": [f_dc], "lr": lr_rest},
+            {"params": [opacity], "lr": lr_rest * 20.0},
+            {"params": [scale], "lr": lr_rest * 2.0},
+            {"params": [rotation], "lr": lr_rest * 0.4},
+        ]
+        if has_rest:
+            param_groups.append({"params": [f_rest], "lr": lr_rest / 20.0})
+        optimizer = torch.optim.Adam(param_groups, eps=1e-15)
+
+        total_sh = (base.sh_order + 1) ** 2
+        fov_rad = math.radians(horizontal_fov)
+        f_px = 0.5 * render_w / math.tan(fov_rad / 2.0)
+        K = torch.tensor(
+            [
+                [f_px, 0.0, render_w / 2.0],
+                [0.0, f_px, render_h / 2.0],
+                [0.0, 0.0, 1.0],
+            ],
+            device=target_device,
+            dtype=torch.float32,
+        )
+        gsplat_mod = _import_gsplat() if use_gsplat else None
+
+        for _ in _progress(range(int(iterations)), desc="SplatPolish"):
+            frame_idx = int(torch.randint(0, num_frames, (1,)).item())
+            target = frames[frame_idx].to(target_device)
+            pose = traj[frame_idx]
+
+            if use_gsplat:
+                quats = rotation / rotation.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+                sh = torch.cat([f_dc, f_rest], dim=1).view(-1, 3, total_sh).transpose(1, 2)
+                renders, _alphas, _meta = gsplat_mod.rasterization(
+                    means=xyz,
+                    quats=quats,
+                    scales=torch.exp(scale),
+                    opacities=torch.sigmoid(opacity).view(-1),
+                    colors=sh,
+                    viewmats=pose.unsqueeze(0),
+                    Ks=K.unsqueeze(0),
+                    width=render_w,
+                    height=render_h,
+                    sh_degree=int(base.sh_order),
+                    render_mode="RGB",
+                )
+                pred = renders[0, ..., :3].clamp(0.0, 1.0)
+            else:
+                current = GaussianSplats(
+                    xyz=xyz,
+                    scale=scale,
+                    rotation=rotation,
+                    opacity=opacity,
+                    f_dc=f_dc,
+                    f_rest=f_rest,
+                    sh_order=base.sh_order,
+                )
+                img, _mask, _disp = render_gaussians(
+                    current,
+                    pose,
+                    "PINHOLE",
+                    horizontal_fov,
+                    render_w,
+                    render_h,
+                    max_splats=0,
+                    opacity_is_logit=True,
+                    add_sh_bias=True,
+                    render_mode="fast",
+                    device=target_device.type,
+                )
+                pred = img[0]
+            if not pred.requires_grad:
+                continue  # nothing visible from this pose
+
+            l1 = (pred - target).abs().mean()
+            loss = lambda_l1 * l1
+            if lambda_dssim > 0.0:
+                ssim_val = _ssim(
+                    pred.permute(2, 0, 1).unsqueeze(0),
+                    target.permute(2, 0, 1).unsqueeze(0),
+                )
+                loss = loss + lambda_dssim * (1.0 - ssim_val)
+            if opacity_reg > 0.0:
+                loss = loss + opacity_reg * torch.sigmoid(opacity).mean()
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            with torch.no_grad():
+                rotation.data = rotation.data / rotation.data.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+                opacity.data.clamp_(-15.0, 15.0)
+                scale.data.clamp_(-12.0, 6.0)
+
+        polished = GaussianSplats(
+            xyz=xyz.detach().clone(),
+            scale=scale.detach().clone(),
+            rotation=(rotation / rotation.norm(dim=-1, keepdim=True).clamp(min=1e-8)).detach().clone(),
+            opacity=opacity.detach().clone(),
+            f_dc=f_dc.detach().clone(),
+            f_rest=f_rest.detach().clone(),
+            sh_order=base.sh_order,
+        )
+        return (polished,)
+
+
 NODE_CLASS_MAPPINGS = {
     "LoadPlySplat": LoadPlySplat,
     "ImageToSplat": ImageToSplat,
@@ -1539,4 +2493,7 @@ NODE_CLASS_MAPPINGS = {
     "MergeSplats": MergeSplats,
     "RenderSplat": RenderSplat,
     "SavePlySplat": SavePlySplat,
+    "FuseSplats": FuseSplats,
+    "VideoToFusedSplats": VideoToFusedSplats,
+    "SplatPolish": SplatPolish,
 }

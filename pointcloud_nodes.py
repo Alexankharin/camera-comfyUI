@@ -7,7 +7,10 @@ import os
 import folder_paths
 import logging
 import hashlib
-from kornia.filters import median_blur
+try:
+    from kornia.filters import median_blur
+except ImportError:  # kornia is optional; median_blur is not used in this module
+    median_blur = None
 
 from tqdm import tqdm
 # Try importing open3d and its visualization modules; log a warning if not found
@@ -135,6 +138,116 @@ def project_first_hit(volume_sparse: torch.Tensor) -> Tuple[torch.Tensor, torch.
     rgba = (volume * first_hit.unsqueeze(-1)).sum(dim=2)  # (H, W, 4)
     
     return rgba.permute(2, 0, 1), first_hit.any(dim=2)
+
+# ==== SE(3) trajectory interpolation ==== #
+def _rotmat_to_quat_wxyz(R: torch.Tensor) -> torch.Tensor:
+    """
+    Convert a batch of rotation matrices [K,3,3] to unit quaternions [K,4] (wxyz).
+    Uses Shepperd's method for numerical robustness. K is expected to be small
+    (trajectory waypoints), so a Python loop is acceptable.
+    """
+    quats = []
+    for i in range(R.shape[0]):
+        m = R[i]
+        trace = m[0, 0] + m[1, 1] + m[2, 2]
+        if trace > 0.0:
+            s = torch.sqrt(trace + 1.0) * 2.0
+            w = 0.25 * s
+            x = (m[2, 1] - m[1, 2]) / s
+            y = (m[0, 2] - m[2, 0]) / s
+            z = (m[1, 0] - m[0, 1]) / s
+        elif m[0, 0] > m[1, 1] and m[0, 0] > m[2, 2]:
+            s = torch.sqrt(1.0 + m[0, 0] - m[1, 1] - m[2, 2]) * 2.0
+            w = (m[2, 1] - m[1, 2]) / s
+            x = 0.25 * s
+            y = (m[0, 1] + m[1, 0]) / s
+            z = (m[0, 2] + m[2, 0]) / s
+        elif m[1, 1] > m[2, 2]:
+            s = torch.sqrt(1.0 + m[1, 1] - m[0, 0] - m[2, 2]) * 2.0
+            w = (m[0, 2] - m[2, 0]) / s
+            x = (m[0, 1] + m[1, 0]) / s
+            y = 0.25 * s
+            z = (m[1, 2] + m[2, 1]) / s
+        else:
+            s = torch.sqrt(1.0 + m[2, 2] - m[0, 0] - m[1, 1]) * 2.0
+            w = (m[1, 0] - m[0, 1]) / s
+            x = (m[0, 2] + m[2, 0]) / s
+            y = (m[1, 2] + m[2, 1]) / s
+            z = 0.25 * s
+        quats.append(torch.stack([w, x, y, z]))
+    q = torch.stack(quats, dim=0)
+    return q / q.norm(dim=-1, keepdim=True).clamp(min=1e-12)
+
+
+def _quat_wxyz_to_rotmat(q: torch.Tensor) -> torch.Tensor:
+    """Convert unit quaternions [N,4] (wxyz) to rotation matrices [N,3,3]."""
+    q = q / q.norm(dim=-1, keepdim=True).clamp(min=1e-12)
+    w, x, y, z = q.unbind(-1)
+    R = torch.stack([
+        1 - 2 * (y * y + z * z), 2 * (x * y - w * z),     2 * (x * z + w * y),
+        2 * (x * y + w * z),     1 - 2 * (x * x + z * z), 2 * (y * z - w * x),
+        2 * (x * z - w * y),     2 * (y * z + w * x),     1 - 2 * (x * x + y * y),
+    ], dim=-1).reshape(*q.shape[:-1], 3, 3)
+    return R
+
+
+def _quat_slerp(q0: torch.Tensor, q1: torch.Tensor, alpha: torch.Tensor) -> torch.Tensor:
+    """
+    Spherical linear interpolation between quaternion batches q0, q1 [N,4] (wxyz)
+    with per-element interpolation factors alpha [N]. Falls back to normalized
+    lerp when the quaternions are nearly parallel.
+    """
+    dot = (q0 * q1).sum(dim=-1, keepdim=True)
+    q1 = torch.where(dot < 0.0, -q1, q1)          # shortest arc
+    dot = dot.abs().clamp(max=1.0)
+    a = alpha.reshape(-1, 1).to(q0.dtype)
+    theta = torch.acos(dot)
+    sin_theta = torch.sin(theta)
+    near_parallel = sin_theta < 1e-6
+    denom = sin_theta.clamp(min=1e-12)
+    w0 = torch.where(near_parallel, 1.0 - a, torch.sin((1.0 - a) * theta) / denom)
+    w1 = torch.where(near_parallel, a, torch.sin(a * theta) / denom)
+    q = w0 * q0 + w1 * q1
+    return q / q.norm(dim=-1, keepdim=True).clamp(min=1e-12)
+
+
+def interpolate_se3(trajectory: torch.Tensor, num_steps: int) -> torch.Tensor:
+    """trajectory [K,4,4] -> [num_steps,4,4]. Piecewise: quaternion SLERP on R, lerp on t.
+    K==1 -> repeat. Must return valid rotation matrices (orthonormal)."""
+    if isinstance(trajectory, np.ndarray):
+        trajectory = torch.from_numpy(trajectory)
+    trajectory = trajectory.float()
+    if trajectory.dim() == 2:
+        trajectory = trajectory.unsqueeze(0)
+    if trajectory.dim() != 3 or trajectory.shape[-2:] != (4, 4):
+        raise ValueError(f"interpolate_se3 expects trajectory of shape [K,4,4], got {tuple(trajectory.shape)}")
+    if num_steps < 1:
+        raise ValueError(f"interpolate_se3 requires num_steps >= 1, got {num_steps}")
+    K = trajectory.shape[0]
+    if K == 1:
+        return trajectory.expand(num_steps, 4, 4).clone()
+
+    R = trajectory[:, :3, :3]
+    t = trajectory[:, :3, 3]
+    q = _rotmat_to_quat_wxyz(R)
+    # Enforce hemisphere continuity along the waypoint sequence so piecewise
+    # SLERP always takes the shortest arc between consecutive poses.
+    for k in range(1, K):
+        if (q[k] * q[k - 1]).sum() < 0.0:
+            q[k] = -q[k]
+
+    idxs = torch.linspace(0, K - 1, num_steps, device=trajectory.device)
+    lower = idxs.floor().long().clamp(max=K - 2)
+    upper = lower + 1
+    alpha = (idxs - lower.float())
+
+    q_interp = _quat_slerp(q[lower], q[upper], alpha)
+    t_interp = t[lower] * (1.0 - alpha).unsqueeze(-1) + t[upper] * alpha.unsqueeze(-1)
+
+    out = torch.eye(4, dtype=trajectory.dtype, device=trajectory.device).repeat(num_steps, 1, 1)
+    out[:, :3, :3] = _quat_wxyz_to_rotmat(q_interp)
+    out[:, :3, 3] = t_interp
+    return out
 
 # ==== Node Definitions ==== #
 class DepthToPointCloud:
@@ -794,8 +907,9 @@ class CameraMotionNode:
 
 class CameraInterpolationNode:
     """
-    Wrap two 4×4 poses into a trajectory tensor. 
-    Outputs only `trajectory` (shape 2×4×4).
+    Interpolate between two 4×4 poses into a trajectory tensor using proper
+    SE(3) interpolation (quaternion SLERP on rotation, lerp on translation).
+    Outputs `trajectory` (shape num_steps×4×4, default 2×4×4).
     """
 
     @classmethod
@@ -804,7 +918,10 @@ class CameraInterpolationNode:
             "required": {
                 "initial_matrix": ("MAT_4X4",),
                 "final_matrix":   ("MAT_4X4",),
-            }
+            },
+            "optional": {
+                "num_steps": ("INT", {"default": 2, "min": 2, "max": 4096, "tooltip": "Number of poses in the output trajectory, SE(3)-interpolated between the two matrices."}),
+            },
         }
     RETURN_TYPES = ("TENSOR",)
     RETURN_NAMES = ("trajectory",)
@@ -815,14 +932,15 @@ class CameraInterpolationNode:
         self,
         initial_matrix: torch.Tensor,
         final_matrix:   torch.Tensor,
+        num_steps: int = 2,
     ) -> Tuple[torch.Tensor]:
-        # stack into a (2,4,4) trajectory
         # convert to tensor if needed
         if isinstance(initial_matrix, np.ndarray):
             initial_matrix = torch.from_numpy(initial_matrix).float()
         if isinstance(final_matrix, np.ndarray):
             final_matrix = torch.from_numpy(final_matrix).float()
-        traj = torch.stack([initial_matrix, final_matrix], dim=0)
+        keyframes = torch.stack([initial_matrix.float(), final_matrix.float()], dim=0)
+        traj = interpolate_se3(keyframes, num_steps)
         return (traj,)
 
 
@@ -1250,6 +1368,95 @@ class LoadTrajectory:
             return f"Invalid trajectory file: {trajectory_file}"
         return True
 
+class DepthEdgeFilter:
+    """
+    Detect "flying pixel" depth discontinuities and output a validity mask.
+    A pixel is flagged as an edge where |depth gradient| / depth exceeds
+    `relative_threshold`; edges are optionally dilated. Returns a MASK with
+    1.0 where the depth is valid (NOT a flying-pixel edge) and 0.0 on edges.
+    """
+    @classmethod
+    def INPUT_TYPES(cls) -> Dict[str, Any]:
+        return {
+            "required": {
+                # Depth: [H,W] or [T,H,W], trailing channel dim of 1 accepted
+                "depth": ("TENSOR", {"shape_hint": [None, None, None]}),
+                "relative_threshold": ("FLOAT", {"default": 0.05, "min": 0.0, "max": 10.0, "step": 0.005, "tooltip": "Mark a pixel as edge where |depth gradient| / depth exceeds this value."}),
+                "dilate": ("INT", {"default": 1, "min": 0, "max": 64, "tooltip": "Grow detected edges by this many pixels (max-pool dilation)."}),
+            },
+            "optional": {
+                "mask": ("MASK", {"tooltip": "Optional validity mask ANDed with the edge-filter result."}),
+            },
+        }
+
+    RETURN_TYPES = ("MASK",)
+    RETURN_NAMES = ("valid_mask",)
+    FUNCTION = "filter_edges"
+    CATEGORY = "Camera/PointCloud"
+
+    def filter_edges(
+        self,
+        depth: torch.Tensor,
+        relative_threshold: float,
+        dilate: int,
+        mask: torch.Tensor = None,
+    ) -> Tuple[torch.Tensor]:
+        d = depth
+        if isinstance(d, np.ndarray):
+            d = torch.from_numpy(d)
+        d = d.float()
+        # Accept [H,W], [H,W,1], [T,H,W], [T,H,W,1]
+        if d.dim() == 4 and d.shape[-1] == 1:
+            d = d[..., 0]
+        elif d.dim() == 3 and d.shape[-1] == 1:
+            d = d[..., 0]
+        squeeze_batch = False
+        if d.dim() == 2:
+            d = d.unsqueeze(0)
+            squeeze_batch = True
+        if d.dim() != 3:
+            raise ValueError(f"DepthEdgeFilter expects depth of shape [H,W] or [T,H,W] (trailing 1 ok), got {tuple(depth.shape)}")
+
+        eps = 1e-8
+        # Forward differences along x and y; propagate each difference to both
+        # neighbouring pixels so both sides of a discontinuity are flagged.
+        dx = (d[:, :, 1:] - d[:, :, :-1]).abs()
+        dy = (d[:, 1:, :] - d[:, :-1, :]).abs()
+        gx = torch.zeros_like(d)
+        gx[:, :, :-1] = dx
+        gx[:, :, 1:] = torch.maximum(gx[:, :, 1:], dx)
+        gy = torch.zeros_like(d)
+        gy[:, :-1, :] = dy
+        gy[:, 1:, :] = torch.maximum(gy[:, 1:, :], dy)
+        grad = torch.maximum(gx, gy)
+        edge = (grad / d.abs().clamp(min=eps)) > relative_threshold
+
+        if dilate > 0:
+            k = 2 * int(dilate) + 1
+            edge = F.max_pool2d(edge.float().unsqueeze(1), kernel_size=k, stride=1, padding=int(dilate)).squeeze(1) > 0.5
+
+        valid = (~edge).float()
+
+        if mask is not None:
+            m = mask
+            if isinstance(m, np.ndarray):
+                m = torch.from_numpy(m)
+            m = m.float().to(valid.device)
+            if m.dim() == 4 and m.shape[-1] == 1:
+                m = m[..., 0]
+            if m.dim() == 2:
+                m = m.unsqueeze(0)
+            if m.shape[0] == 1 and valid.shape[0] > 1:
+                m = m.expand(valid.shape[0], -1, -1)
+            if m.shape[-2:] != valid.shape[-2:]:
+                m = F.interpolate(m.unsqueeze(1), size=valid.shape[-2:], mode="nearest").squeeze(1)
+            valid = valid * (m > 0.5).float()
+
+        if squeeze_batch:
+            valid = valid[0]
+        return (valid,)
+
+
 NODE_CLASS_MAPPINGS = {
     "DepthToPointCloud": DepthToPointCloud,
     "TransformPointCloud": TransformPointCloud,
@@ -1264,4 +1471,5 @@ NODE_CLASS_MAPPINGS = {
     "PointCloudCleaner": PointCloudCleaner,
     "SaveTrajectory": SaveTrajectory,
     "LoadTrajectory": LoadTrajectory,
+    "DepthEdgeFilter": DepthEdgeFilter,
 }

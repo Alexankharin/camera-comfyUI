@@ -1,0 +1,1515 @@
+{
+  "id": "b7a3c1de-4d20-4f4a-9c1e-video4dworld1",
+  "revision": 0,
+  "last_node_id": 21,
+  "last_link_id": 39,
+  "nodes": [
+    {
+      "id": 19,
+      "type": "Note",
+      "pos": [
+        -1650,
+        -380
+      ],
+      "size": [
+        620,
+        460
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "README: video -> 4D Gaussian world",
+      "properties": {},
+      "widgets_values": [
+        "VIDEO -> 4D GAUSSIAN WORLD\n\nRequirements:\n- gsplat + CUDA (pip install gsplat) for fast rendering and for SplatPolish (it errors without CUDA unless allow_torch_fallback is enabled).\n- VGGT: pip install vggt (or clone facebookresearch/vggt next to ComfyUI). facebook/VGGT-1B (~5GB) downloads on first run.\n- CoTracker3: downloaded automatically via torch.hub on first use of EstimateTracks (needs internet once).\n- SHARP: lives in this pack's submodules/ml-sharpt; the default checkpoint downloads on first use, or drop a .pt into ComfyUI/input and pick it in the checkpoint choosers.\n- VHS_LoadVideoPath comes from ComfyUI-VideoHelperSuite (install via Manager). SaveWEBM / InvertMask / ImageFromBatch are comfy-core.\n\nHow it fits together:\n- VGGT poses are relative to frame 0, so the WORLD frame == the frame-0 camera frame. That is why the frame-0 SHARP splats (ImageToSplat) need no extra transform and SplitSplatsByMask can use its default identity camera.\n- VideoPoseEstimator already outputs RADIAL (ray) depth, which is what every depth consumer here expects - no Z-depth conversion node is needed.\n- The horizontal_fov FLOAT output feeds every fov input downstream (converted widget inputs).\n- SplitSplatsByMask receives the full [T,H,W] motion mask and uses frame 0 of it (its canonical view).\n- The novel camera path (TransformToMatrix pair) is expressed in the same world frame; identity = the original frame-0 camera."
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 1,
+      "type": "VHS_LoadVideoPath",
+      "pos": [
+        -1600,
+        250
+      ],
+      "size": [
+        240,
+        380
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "meta_batch",
+          "shape": 7,
+          "type": "VHS_BatchManager",
+          "link": null
+        },
+        {
+          "name": "vae",
+          "shape": 7,
+          "type": "VAE",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ]
+        },
+        {
+          "name": "frame_count",
+          "type": "INT",
+          "links": null
+        },
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "links": null
+        },
+        {
+          "name": "video_info",
+          "type": "VHS_VIDEOINFO",
+          "links": null
+        }
+      ],
+      "title": "Load Video (<= 64 frames)",
+      "properties": {
+        "cnr_id": "comfyui-videohelpersuite",
+        "aux_id": "Kosinkadink/ComfyUI-VideoHelperSuite",
+        "Node name for S&R": "VHS_LoadVideoPath"
+      },
+      "widgets_values": {
+        "video": "input/video.mp4",
+        "force_rate": 0,
+        "custom_width": 0,
+        "custom_height": 0,
+        "frame_load_cap": 49,
+        "skip_first_frames": 0,
+        "select_every_nth": 1,
+        "format": "AnimateDiff",
+        "videopreview": {
+          "hidden": false,
+          "paused": false,
+          "params": {
+            "filename": "input/video.mp4",
+            "type": "path",
+            "format": "video/mp4",
+            "force_rate": 0,
+            "custom_width": 0,
+            "custom_height": 0,
+            "frame_load_cap": 49,
+            "skip_first_frames": 0,
+            "select_every_nth": 1
+          }
+        }
+      }
+    },
+    {
+      "id": 2,
+      "type": "VideoPoseEstimator",
+      "pos": [
+        -1280,
+        250
+      ],
+      "size": [
+        300,
+        170
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "frames",
+          "type": "IMAGE",
+          "link": 1
+        }
+      ],
+      "outputs": [
+        {
+          "name": "trajectory",
+          "type": "TENSOR",
+          "links": [
+            6,
+            7,
+            8,
+            9
+          ]
+        },
+        {
+          "name": "depths",
+          "type": "TENSOR",
+          "links": [
+            10,
+            11,
+            12
+          ]
+        },
+        {
+          "name": "horizontal_fov",
+          "type": "FLOAT",
+          "links": [
+            13,
+            14,
+            15,
+            16,
+            17,
+            18,
+            19
+          ]
+        },
+        {
+          "name": "confidence",
+          "type": "TENSOR",
+          "links": null
+        }
+      ],
+      "title": "VGGT: poses + radial depth + fov",
+      "properties": {
+        "aux_id": "Alexankharin/camera-comfyUI",
+        "Node name for S&R": "VideoPoseEstimator"
+      },
+      "widgets_values": [
+        64,
+        518,
+        "auto"
+      ]
+    },
+    {
+      "id": 3,
+      "type": "MotionMaskFromDepth",
+      "pos": [
+        -880,
+        250
+      ],
+      "size": [
+        330,
+        230
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "depth_seq",
+          "type": "TENSOR",
+          "link": 10
+        },
+        {
+          "name": "trajectory",
+          "type": "TENSOR",
+          "link": 6
+        },
+        {
+          "name": "input_horizontal_fov",
+          "type": "FLOAT",
+          "widget": {
+            "name": "input_horizontal_fov"
+          },
+          "link": 13
+        }
+      ],
+      "outputs": [
+        {
+          "name": "motion_mask",
+          "type": "MASK",
+          "links": [
+            20,
+            21
+          ]
+        }
+      ],
+      "title": "Dynamic-pixel mask (1 = moving)",
+      "properties": {
+        "aux_id": "Alexankharin/camera-comfyUI",
+        "Node name for S&R": "MotionMaskFromDepth"
+      },
+      "widgets_values": [
+        "PINHOLE",
+        60.0,
+        0.1,
+        4,
+        2,
+        "auto"
+      ]
+    },
+    {
+      "id": 4,
+      "type": "InvertMask",
+      "pos": [
+        -480,
+        290
+      ],
+      "size": [
+        180,
+        30
+      ],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "mask",
+          "type": "MASK",
+          "link": 20
+        }
+      ],
+      "outputs": [
+        {
+          "name": "MASK",
+          "type": "MASK",
+          "links": [
+            22
+          ]
+        }
+      ],
+      "title": "Static mask (1 = static)",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "Node name for S&R": "InvertMask"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 5,
+      "type": "VideoToFusedSplats",
+      "pos": [
+        -180,
+        250
+      ],
+      "size": [
+        340,
+        280
+      ],
+      "flags": {},
+      "order": 11,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "frames",
+          "type": "IMAGE",
+          "link": 2
+        },
+        {
+          "name": "trajectory",
+          "type": "TENSOR",
+          "link": 7
+        },
+        {
+          "name": "horizontal_fov",
+          "type": "FLOAT",
+          "widget": {
+            "name": "horizontal_fov"
+          },
+          "link": 14
+        },
+        {
+          "name": "static_mask",
+          "shape": 7,
+          "type": "MASK",
+          "link": 22
+        },
+        {
+          "name": "depths",
+          "shape": 7,
+          "type": "TENSOR",
+          "link": 11
+        }
+      ],
+      "outputs": [
+        {
+          "name": "splats",
+          "type": "GSPLAT",
+          "links": [
+            23
+          ]
+        }
+      ],
+      "title": "SHARP keyframes -> fused static world",
+      "properties": {
+        "aux_id": "Alexankharin/camera-comfyUI",
+        "Node name for S&R": "VideoToFusedSplats"
+      },
+      "widgets_values": [
+        60.0,
+        "<download default>",
+        8,
+        0.01,
+        "smart",
+        "auto"
+      ]
+    },
+    {
+      "id": 6,
+      "type": "SplatPolish",
+      "pos": [
+        240,
+        250
+      ],
+      "size": [
+        340,
+        340
+      ],
+      "flags": {},
+      "order": 14,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "splats",
+          "type": "GSPLAT",
+          "link": 23
+        },
+        {
+          "name": "frames",
+          "type": "IMAGE",
+          "link": 3
+        },
+        {
+          "name": "trajectory",
+          "type": "TENSOR",
+          "link": 8
+        },
+        {
+          "name": "horizontal_fov",
+          "type": "FLOAT",
+          "widget": {
+            "name": "horizontal_fov"
+          },
+          "link": 15
+        }
+      ],
+      "outputs": [
+        {
+          "name": "polished_splats",
+          "type": "GSPLAT",
+          "links": [
+            24,
+            38
+          ]
+        }
+      ],
+      "title": "SplatPolish (needs gsplat + CUDA)",
+      "properties": {
+        "aux_id": "Alexankharin/camera-comfyUI",
+        "Node name for S&R": "SplatPolish"
+      },
+      "widgets_values": [
+        60.0,
+        300,
+        0.00016,
+        0.0025,
+        0.8,
+        0.2,
+        0.01,
+        false,
+        "auto"
+      ]
+    },
+    {
+      "id": 7,
+      "type": "EstimateTracks",
+      "pos": [
+        -880,
+        800
+      ],
+      "size": [
+        300,
+        130
+      ],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "frames",
+          "type": "IMAGE",
+          "link": 4
+        }
+      ],
+      "outputs": [
+        {
+          "name": "tracks",
+          "type": "TENSOR",
+          "links": [
+            25
+          ]
+        },
+        {
+          "name": "visibility",
+          "type": "TENSOR",
+          "links": [
+            26
+          ]
+        }
+      ],
+      "title": "CoTracker3 (downloads on first use)",
+      "properties": {
+        "aux_id": "Alexankharin/camera-comfyUI",
+        "Node name for S&R": "EstimateTracks"
+      },
+      "widgets_values": [
+        20,
+        "auto"
+      ]
+    },
+    {
+      "id": 8,
+      "type": "TracksToTrajectories",
+      "pos": [
+        -500,
+        800
+      ],
+      "size": [
+        330,
+        210
+      ],
+      "flags": {},
+      "order": 13,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "tracks",
+          "type": "TENSOR",
+          "link": 25
+        },
+        {
+          "name": "visibility",
+          "type": "TENSOR",
+          "link": 26
+        },
+        {
+          "name": "depth_seq",
+          "type": "TENSOR",
+          "link": 12
+        },
+        {
+          "name": "input_horizontal_fov",
+          "type": "FLOAT",
+          "widget": {
+            "name": "input_horizontal_fov"
+          },
+          "link": 16
+        },
+        {
+          "name": "trajectory",
+          "shape": 7,
+          "type": "TENSOR",
+          "link": 9
+        }
+      ],
+      "outputs": [
+        {
+          "name": "trajectories3d",
+          "type": "TENSOR",
+          "links": [
+            27
+          ]
+        },
+        {
+          "name": "track_valid",
+          "type": "TENSOR",
+          "links": [
+            28
+          ]
+        }
+      ],
+      "title": "Lift tracks to 3D world trajectories",
+      "properties": {
+        "aux_id": "Alexankharin/camera-comfyUI",
+        "Node name for S&R": "TracksToTrajectories"
+      },
+      "widgets_values": [
+        "PINHOLE",
+        60.0,
+        0.5,
+        "auto"
+      ]
+    },
+    {
+      "id": 9,
+      "type": "ImageFromBatch",
+      "pos": [
+        -880,
+        1120
+      ],
+      "size": [
+        300,
+        100
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 5
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            29
+          ]
+        }
+      ],
+      "title": "Frame 0 (canonical view)",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "Node name for S&R": "ImageFromBatch"
+      },
+      "widgets_values": [
+        0,
+        1
+      ]
+    },
+    {
+      "id": 10,
+      "type": "ImageToSplat",
+      "pos": [
+        -500,
+        1120
+      ],
+      "size": [
+        300,
+        150
+      ],
+      "flags": {},
+      "order": 12,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 29
+        },
+        {
+          "name": "horizontal_fov",
+          "type": "FLOAT",
+          "widget": {
+            "name": "horizontal_fov"
+          },
+          "link": 17
+        }
+      ],
+      "outputs": [
+        {
+          "name": "splats",
+          "type": "GSPLAT",
+          "links": [
+            30
+          ]
+        }
+      ],
+      "title": "SHARP frame 0 (world = frame-0 cam)",
+      "properties": {
+        "aux_id": "Alexankharin/camera-comfyUI",
+        "Node name for S&R": "ImageToSplat"
+      },
+      "widgets_values": [
+        60.0,
+        "<download default>",
+        "auto"
+      ]
+    },
+    {
+      "id": 11,
+      "type": "SplitSplatsByMask",
+      "pos": [
+        -120,
+        1080
+      ],
+      "size": [
+        320,
+        210
+      ],
+      "flags": {},
+      "order": 15,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "splats",
+          "type": "GSPLAT",
+          "link": 30
+        },
+        {
+          "name": "mask",
+          "type": "MASK",
+          "link": 21
+        },
+        {
+          "name": "horizontal_fov",
+          "type": "FLOAT",
+          "widget": {
+            "name": "horizontal_fov"
+          },
+          "link": 18
+        },
+        {
+          "name": "camera_matrix",
+          "shape": 7,
+          "type": "MAT_4X4",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "inside_splats",
+          "type": "GSPLAT",
+          "links": [
+            31
+          ]
+        },
+        {
+          "name": "outside_splats",
+          "type": "GSPLAT",
+          "links": null
+        }
+      ],
+      "title": "Keep dynamic splats (frame-0 mask)",
+      "properties": {
+        "aux_id": "Alexankharin/camera-comfyUI",
+        "Node name for S&R": "SplitSplatsByMask"
+      },
+      "widgets_values": [
+        "PINHOLE",
+        60.0,
+        0.5,
+        "auto"
+      ]
+    },
+    {
+      "id": 12,
+      "type": "BuildSplats4D",
+      "pos": [
+        280,
+        850
+      ],
+      "size": [
+        310,
+        250
+      ],
+      "flags": {},
+      "order": 16,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "canonical",
+          "type": "GSPLAT",
+          "link": 31
+        },
+        {
+          "name": "trajectories3d",
+          "type": "TENSOR",
+          "link": 27
+        },
+        {
+          "name": "static",
+          "shape": 7,
+          "type": "GSPLAT",
+          "link": 24
+        },
+        {
+          "name": "times",
+          "shape": 7,
+          "type": "TENSOR",
+          "link": null
+        },
+        {
+          "name": "track_valid",
+          "shape": 7,
+          "type": "TENSOR",
+          "link": 28
+        }
+      ],
+      "outputs": [
+        {
+          "name": "splats4d",
+          "type": "GSPLAT4D",
+          "links": [
+            32,
+            33
+          ]
+        }
+      ],
+      "title": "Bind canonical to tracks -> GSPLAT4D",
+      "properties": {
+        "aux_id": "Alexankharin/camera-comfyUI",
+        "Node name for S&R": "BuildSplats4D"
+      },
+      "widgets_values": [
+        0,
+        4,
+        0.0,
+        "auto"
+      ]
+    },
+    {
+      "id": 13,
+      "type": "TransformToMatrix",
+      "pos": [
+        700,
+        1250
+      ],
+      "size": [
+        270,
+        154
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "transformation matrix",
+          "type": "MAT_4X4",
+          "links": [
+            34
+          ]
+        }
+      ],
+      "title": "Novel path: start (frame-0 camera)",
+      "properties": {
+        "aux_id": "Alexankharin/camera-comfyUI",
+        "Node name for S&R": "TransformToMatrix"
+      },
+      "widgets_values": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "id": 14,
+      "type": "TransformToMatrix",
+      "pos": [
+        700,
+        1470
+      ],
+      "size": [
+        270,
+        154
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "transformation matrix",
+          "type": "MAT_4X4",
+          "links": [
+            35
+          ]
+        }
+      ],
+      "title": "Novel path: end (small orbit)",
+      "properties": {
+        "aux_id": "Alexankharin/camera-comfyUI",
+        "Node name for S&R": "TransformToMatrix"
+      },
+      "widgets_values": [
+        0.3,
+        0.0,
+        0.1,
+        0.0,
+        -12.0
+      ]
+    },
+    {
+      "id": 15,
+      "type": "CameraInterpolationNode",
+      "pos": [
+        1030,
+        1350
+      ],
+      "size": [
+        250,
+        90
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "initial_matrix",
+          "type": "MAT_4X4",
+          "link": 34
+        },
+        {
+          "name": "final_matrix",
+          "type": "MAT_4X4",
+          "link": 35
+        }
+      ],
+      "outputs": [
+        {
+          "name": "trajectory",
+          "type": "TENSOR",
+          "links": [
+            36,
+            39
+          ]
+        }
+      ],
+      "properties": {
+        "aux_id": "Alexankharin/camera-comfyUI",
+        "Node name for S&R": "CameraInterpolationNode"
+      },
+      "widgets_values": [
+        2
+      ]
+    },
+    {
+      "id": 16,
+      "type": "RenderSplats4DVideo",
+      "pos": [
+        700,
+        850
+      ],
+      "size": [
+        330,
+        320
+      ],
+      "flags": {},
+      "order": 17,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "splats4d",
+          "type": "GSPLAT4D",
+          "link": 32
+        },
+        {
+          "name": "trajectory",
+          "type": "TENSOR",
+          "link": 36
+        },
+        {
+          "name": "camera_horizontal_fov",
+          "type": "FLOAT",
+          "widget": {
+            "name": "camera_horizontal_fov"
+          },
+          "link": 19
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": [
+            37
+          ]
+        },
+        {
+          "name": "masks",
+          "type": "MASK",
+          "links": null
+        },
+        {
+          "name": "disparity",
+          "type": "TENSOR",
+          "links": null
+        }
+      ],
+      "title": "Render 4D along novel path",
+      "properties": {
+        "aux_id": "Alexankharin/camera-comfyUI",
+        "Node name for S&R": "RenderSplats4DVideo"
+      },
+      "widgets_values": [
+        49,
+        0.0,
+        1.0,
+        "PINHOLE",
+        60.0,
+        768,
+        432,
+        "auto",
+        0,
+        "auto"
+      ]
+    },
+    {
+      "id": 17,
+      "type": "SaveWEBM",
+      "pos": [
+        1100,
+        850
+      ],
+      "size": [
+        280,
+        320
+      ],
+      "flags": {},
+      "order": 19,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 37
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "Node name for S&R": "SaveWEBM"
+      },
+      "widgets_values": [
+        "4d_world_render",
+        "vp9",
+        24,
+        32
+      ]
+    },
+    {
+      "id": 18,
+      "type": "SaveSplats4D",
+      "pos": [
+        1100,
+        620
+      ],
+      "size": [
+        280,
+        110
+      ],
+      "flags": {},
+      "order": 20,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "splats4d",
+          "type": "GSPLAT4D",
+          "link": 33
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "aux_id": "Alexankharin/camera-comfyUI",
+        "Node name for S&R": "SaveSplats4D"
+      },
+      "widgets_values": [
+        "ComfyUISplat4D",
+        false
+      ]
+    },
+    {
+      "id": 20,
+      "type": "SplatTrajectoryEnricher",
+      "pos": [
+        700,
+        1780
+      ],
+      "size": [
+        360,
+        520
+      ],
+      "flags": {},
+      "order": 18,
+      "mode": 2,
+      "inputs": [
+        {
+          "name": "splats",
+          "type": "GSPLAT",
+          "link": 38
+        },
+        {
+          "name": "trajectory",
+          "type": "TENSOR",
+          "link": 39
+        }
+      ],
+      "outputs": [
+        {
+          "name": "enriched_splats",
+          "type": "GSPLAT",
+          "links": null
+        },
+        {
+          "name": "last_render",
+          "type": "IMAGE",
+          "links": null
+        },
+        {
+          "name": "last_filled",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "title": "OPTIONAL (muted): world expansion - Flux outpaint + SHARP",
+      "properties": {
+        "aux_id": "Alexankharin/camera-comfyUI",
+        "Node name for S&R": "SplatTrajectoryEnricher"
+      },
+      "widgets_values": [
+        "PINHOLE",
+        60.0,
+        768,
+        432,
+        "<download default>",
+        "",
+        28,
+        5.0,
+        5,
+        0.02,
+        0.01,
+        10,
+        "auto",
+        true,
+        "PINHOLE",
+        90.0,
+        1024,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "id": 21,
+      "type": "Note",
+      "pos": [
+        1120,
+        1780
+      ],
+      "size": [
+        360,
+        260
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "About world expansion",
+      "properties": {},
+      "widgets_values": [
+        "SplatTrajectoryEnricher is MUTED by default: it needs diffusers + the Flux fill weights (multi-GB) and a strong GPU.\n\nUnmute it to grow the static world beyond what the source video saw: for each pose along the novel path it renders the current splats, outpaints uncovered regions with Flux, lifts the filled view with SHARP, scale-aligns and smart-stitches the new content.\n\nTo use its result in the 4D scene, rewire BuildSplats4D.static from SplatPolish's output to enriched_splats."
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
+    }
+  ],
+  "links": [
+    [
+      1,
+      1,
+      0,
+      2,
+      0,
+      "IMAGE"
+    ],
+    [
+      2,
+      1,
+      0,
+      5,
+      0,
+      "IMAGE"
+    ],
+    [
+      3,
+      1,
+      0,
+      6,
+      1,
+      "IMAGE"
+    ],
+    [
+      4,
+      1,
+      0,
+      7,
+      0,
+      "IMAGE"
+    ],
+    [
+      5,
+      1,
+      0,
+      9,
+      0,
+      "IMAGE"
+    ],
+    [
+      6,
+      2,
+      0,
+      3,
+      1,
+      "TENSOR"
+    ],
+    [
+      7,
+      2,
+      0,
+      5,
+      1,
+      "TENSOR"
+    ],
+    [
+      8,
+      2,
+      0,
+      6,
+      2,
+      "TENSOR"
+    ],
+    [
+      9,
+      2,
+      0,
+      8,
+      4,
+      "TENSOR"
+    ],
+    [
+      10,
+      2,
+      1,
+      3,
+      0,
+      "TENSOR"
+    ],
+    [
+      11,
+      2,
+      1,
+      5,
+      4,
+      "TENSOR"
+    ],
+    [
+      12,
+      2,
+      1,
+      8,
+      2,
+      "TENSOR"
+    ],
+    [
+      13,
+      2,
+      2,
+      3,
+      2,
+      "FLOAT"
+    ],
+    [
+      14,
+      2,
+      2,
+      5,
+      2,
+      "FLOAT"
+    ],
+    [
+      15,
+      2,
+      2,
+      6,
+      3,
+      "FLOAT"
+    ],
+    [
+      16,
+      2,
+      2,
+      8,
+      3,
+      "FLOAT"
+    ],
+    [
+      17,
+      2,
+      2,
+      10,
+      1,
+      "FLOAT"
+    ],
+    [
+      18,
+      2,
+      2,
+      11,
+      2,
+      "FLOAT"
+    ],
+    [
+      19,
+      2,
+      2,
+      16,
+      2,
+      "FLOAT"
+    ],
+    [
+      20,
+      3,
+      0,
+      4,
+      0,
+      "MASK"
+    ],
+    [
+      21,
+      3,
+      0,
+      11,
+      1,
+      "MASK"
+    ],
+    [
+      22,
+      4,
+      0,
+      5,
+      3,
+      "MASK"
+    ],
+    [
+      23,
+      5,
+      0,
+      6,
+      0,
+      "GSPLAT"
+    ],
+    [
+      24,
+      6,
+      0,
+      12,
+      2,
+      "GSPLAT"
+    ],
+    [
+      25,
+      7,
+      0,
+      8,
+      0,
+      "TENSOR"
+    ],
+    [
+      26,
+      7,
+      1,
+      8,
+      1,
+      "TENSOR"
+    ],
+    [
+      27,
+      8,
+      0,
+      12,
+      1,
+      "TENSOR"
+    ],
+    [
+      28,
+      8,
+      1,
+      12,
+      4,
+      "TENSOR"
+    ],
+    [
+      29,
+      9,
+      0,
+      10,
+      0,
+      "IMAGE"
+    ],
+    [
+      30,
+      10,
+      0,
+      11,
+      0,
+      "GSPLAT"
+    ],
+    [
+      31,
+      11,
+      0,
+      12,
+      0,
+      "GSPLAT"
+    ],
+    [
+      32,
+      12,
+      0,
+      16,
+      0,
+      "GSPLAT4D"
+    ],
+    [
+      33,
+      12,
+      0,
+      18,
+      0,
+      "GSPLAT4D"
+    ],
+    [
+      34,
+      13,
+      0,
+      15,
+      0,
+      "MAT_4X4"
+    ],
+    [
+      35,
+      14,
+      0,
+      15,
+      1,
+      "MAT_4X4"
+    ],
+    [
+      36,
+      15,
+      0,
+      16,
+      1,
+      "TENSOR"
+    ],
+    [
+      37,
+      16,
+      0,
+      17,
+      0,
+      "IMAGE"
+    ],
+    [
+      38,
+      6,
+      0,
+      20,
+      0,
+      "GSPLAT"
+    ],
+    [
+      39,
+      15,
+      0,
+      20,
+      1,
+      "TENSOR"
+    ]
+  ],
+  "groups": [
+    {
+      "id": 1,
+      "title": "1. Load & Pose (VGGT)",
+      "bounding": [
+        -1650,
+        150,
+        720,
+        560
+      ],
+      "color": "#3f789e",
+      "font_size": 24,
+      "flags": {}
+    },
+    {
+      "id": 2,
+      "title": "2. Motion Masks",
+      "bounding": [
+        -910,
+        150,
+        640,
+        420
+      ],
+      "color": "#a1309b",
+      "font_size": 24,
+      "flags": {}
+    },
+    {
+      "id": 3,
+      "title": "3. Static World Splats",
+      "bounding": [
+        -230,
+        150,
+        850,
+        500
+      ],
+      "color": "#8154a6",
+      "font_size": 24,
+      "flags": {}
+    },
+    {
+      "id": 4,
+      "title": "4. Dynamic 4D Splats",
+      "bounding": [
+        -910,
+        720,
+        1540,
+        640
+      ],
+      "color": "#b06634",
+      "font_size": 24,
+      "flags": {}
+    },
+    {
+      "id": 5,
+      "title": "5. Novel Camera Path, Render & Save",
+      "bounding": [
+        660,
+        540,
+        760,
+        1140
+      ],
+      "color": "#3f789e",
+      "font_size": 24,
+      "flags": {}
+    },
+    {
+      "id": 6,
+      "title": "6. OPTIONAL: World Expansion (muted)",
+      "bounding": [
+        660,
+        1700,
+        860,
+        640
+      ],
+      "color": "#88A",
+      "font_size": 24,
+      "flags": {}
+    }
+  ],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.4,
+      "offset": [
+        1700,
+        450
+      ]
+    },
+    "frontendVersion": "1.23.4"
+  },
+  "version": 0.4
+}
