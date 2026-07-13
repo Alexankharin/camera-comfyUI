@@ -36,6 +36,14 @@ A collection of ComfyUI custom nodes to handle diverse camera projections (pinho
 
 ## Installation
 
+### Option A — ComfyUI Manager (recommended)
+
+The node pack is published to the [ComfyUI Registry](https://registry.comfy.org) as **`camera-comfyui`** (publisher `alexk`). In ComfyUI, open **Manager → Custom Nodes Manager**, search for **camera-comfyUI**, and click **Install**, then restart ComfyUI. The registry package bundles the SHARP submodule and installs the base Python requirements automatically; optional CUDA-specific extras (`gsplat`, `vggt`) still follow the manual steps below.
+
+> **Maintainers:** releases are automated — bumping `version` in `pyproject.toml` on `main` triggers `.github/workflows/publish_action.yml`, which publishes the new version to the registry (requires the `REGISTRY_ACCESS_TOKEN` repo secret).
+
+### Option B — Manual install (git)
+
 1. **Clone** into your ComfyUI custom nodes folder:
 
    ```bash

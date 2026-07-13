@@ -1,0 +1,10 @@
+# Excluded from the ComfyUI Registry archive (not from git).
+demo_images/
+notebooks/
+docs/
+screenshot1.ply
+__pycache__/
+models/
+.github/
+Makefile
+install.sh
