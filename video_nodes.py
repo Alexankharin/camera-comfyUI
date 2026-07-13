@@ -7,7 +7,7 @@ from typing import Dict, Any, Tuple
 from tqdm import tqdm  # Added tqdm import
 
 # Import existing pointcloud nodes and projection definitions
-from .pointcloud_nodes import DepthToPointCloud, TransformPointCloud, ProjectPointCloud, Projection, PointCloudCleaner
+from .pointcloud_nodes import DepthToPointCloud, TransformPointCloud, ProjectPointCloud, Projection, PointCloudCleaner, interpolate_se3
 import folder_paths
 
 # Ensure video_depth_anything is on path
@@ -95,18 +95,8 @@ class VideoCameraMotionSequence:
         # depth_seq: [T, H, W] or [T, H, W, 1]
         T, H, W, _ = frames.shape
 
-        # Interpolate trajectory to match T
-        K = trajectory.shape[0]
-        if K < 2:
-            interp_traj = trajectory.expand(T, 4, 4).clone()
-        else:
-            idxs = torch.linspace(0, K - 1, T, device=trajectory.device)
-            lower = idxs.floor().long().clamp(max=K - 2)
-            upper = lower + 1
-            alpha = (idxs - lower.float()).unsqueeze(-1).unsqueeze(-1)
-            traj_lower = trajectory[lower]
-            traj_upper = trajectory[upper]
-            interp_traj = traj_lower * (1 - alpha) + traj_upper * alpha
+        # Interpolate trajectory to match T (SE(3): quaternion SLERP on R, lerp on t)
+        interp_traj = interpolate_se3(trajectory, T)
 
         out_frames = []
         out_masks = []
@@ -122,12 +112,12 @@ class VideoCameraMotionSequence:
         for i, (frame, depth, pose) in enumerate(tqdm(zip(frames, depth_seq, interp_traj), total=T, desc="Processing video frames")):
             if depth.dim() == 3 and depth.shape[-1] == 1:
                 depth = depth.squeeze(-1)
-                # Use mask if provided
-                mask = None
+            # Use mask if provided; must be (re)initialized every iteration
+            mask = None
             if mask_seq is not None:
                 mask = mask_seq[i]
-            if mask.dim() == 3 and mask.shape[-1] == 1:
-                mask = mask.squeeze(-1)
+                if mask.dim() == 3 and mask.shape[-1] == 1:
+                    mask = mask.squeeze(-1)
             # to pointcloud
             pc, = DepthToPointCloud().depth_to_pointcloud(
                 image=frame.permute(2, 0, 1),
@@ -237,6 +227,10 @@ class DepthFramesToVideo:
         raw_color = raw_u8.unsqueeze(1).repeat(1, 3, 1, 1).permute(0, 2, 3, 1)
         return raw_color, ds_color   # [T, 3, H, W] -> [T, H, W, 3]
 
+# Cache for loaded VideoDepthAnything models, keyed by (checkpoint, device)
+_VIDEO_DEPTH_MODEL_CACHE: Dict[Tuple[str, str], Any] = {}
+
+
 class VideoMetricDepthEstimate:
     """
     Estimates metric depth for a sequence of frames using VideoDepthAnything.
@@ -267,16 +261,29 @@ class VideoMetricDepthEstimate:
         input_size: int,
         max_fps: int,
     ) -> Tuple[torch.Tensor, float]:
-        if VideoDepthAnything is None:
-            raise ImportError("VideoDepthAnything library not found")
+        if NO_VIDEO_DEPTH_ANYTHING:
+            raise ImportError(
+                f"VideoDepthAnything library not found. Clone "
+                f"https://github.com/DepthAnything/Video-Depth-Anything into {COMFYUI_ROOT!r} "
+                f"(expected module path: {video_depth_path!r})."
+            )
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         # if max input<1.5 normalize to 0-255
         if frames.max() < 1.5:
             frames = (frames * 255)
-        model = VideoDepthAnything(**{"encoder": "vitl", "features": 256, "out_channels": [256,512,1024,1024]})
-        state = torch.load("/root/ComfyUI/models/checkpoints/{}".format(model_checkpoint), map_location='cpu')
-        model.load_state_dict(state, strict=True)
-        model = model.to(device).eval()
+        cache_key = (model_checkpoint, str(device))
+        model = _VIDEO_DEPTH_MODEL_CACHE.get(cache_key)
+        if model is None:
+            # Same checkpoint directory as computed in INPUT_TYPES
+            model_dir = os.path.join(os.getcwd(), "models", "checkpoints")
+            checkpoint_path = os.path.join(model_dir, model_checkpoint)
+            if not os.path.isfile(checkpoint_path):
+                raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+            model = VideoDepthAnything(**{"encoder": "vitl", "features": 256, "out_channels": [256,512,1024,1024]})
+            state = torch.load(checkpoint_path, map_location='cpu')
+            model.load_state_dict(state, strict=True)
+            model = model.to(device).eval()
+            _VIDEO_DEPTH_MODEL_CACHE[cache_key] = model
         np_frames = frames.cpu().numpy().astype(np.uint8)
         metric_depths, fps = model.infer_video_depth(np_frames, max_fps, input_size=input_size, device=device.type, fp32=False)
         return (torch.from_numpy(metric_depths), float(fps))

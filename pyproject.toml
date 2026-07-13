@@ -1,0 +1,23 @@
+[project]
+name = "camera-comfyui"
+description = "Custom ComfyUI nodes for camera projections (pinhole/fisheye/equirectangular), depth, point clouds, camera trajectories, and 3D/4D Gaussian splatting — including video-to-4D-world workflows."
+version = "1.0.0"
+license = { file = "LICENSE" }
+dependencies = [
+    "transformers==4.50.0",
+    "diffusers==0.33.1",
+    "open3d==0.19.0",
+    "protobuf",
+]
+
+[project.urls]
+Repository = "https://github.com/Alexankharin/camera-comfyUI"
+
+[tool.comfy]
+PublisherId = "alexk"
+DisplayName = "camera-comfyUI"
+# Force-include the SHARP submodule: its files are a gitlink in the parent repo
+# (not git-tracked files), so without this the registry archive would ship
+# without submodules/ml-sharpt and ImageToSplat/VideoToFusedSplats would be
+# unavailable until users clone it manually.
+includes = ["submodules/ml-sharpt/"]
