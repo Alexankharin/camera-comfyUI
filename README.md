@@ -38,7 +38,16 @@ A collection of ComfyUI custom nodes to handle diverse camera projections (pinho
 
 ### Option A — ComfyUI Manager (recommended)
 
-The node pack is published to the [ComfyUI Registry](https://registry.comfy.org) as **`camera-comfyui`** (publisher `alexk`). In ComfyUI, open **Manager → Custom Nodes Manager**, search for **camera-comfyUI**, and click **Install**, then restart ComfyUI. The registry package bundles the SHARP submodule and installs the base Python requirements automatically; optional CUDA-specific extras (`gsplat`, `vggt`) still follow the manual steps below.
+The node pack is published to the [ComfyUI Registry](https://registry.comfy.org) as **`camera-comfyui`** (publisher `alexk`). In ComfyUI, open **Manager → Custom Nodes Manager**, search for **camera-comfyUI**, and click **Install**, then restart ComfyUI.
+
+Installation is fully automatic: ComfyUI-Manager installs `requirements.txt` and then runs this pack's `install.py`, which sets up everything the optional nodes need — no manual steps:
+
+* **vggt** (`VideoPoseEstimator`) — pip-installed from GitHub over https (it is not on PyPI).
+* **SHARP** (`ImageToSplat`, `VideoToFusedSplats`, …) — the `submodules/ml-sharpt` checkout is bundled in the registry package (and fetched via `git submodule`/clone for git installs), and its Python deps come from `requirements.txt`.
+* **gsplat** — pip-installed; its CUDA kernels JIT-compile on first use.
+* **ComfyUI-Flux-Inpainting** (`OutpaintAnyProjection`, `SplatTrajectoryEnricher`) — cloned automatically into `custom_nodes/inpainting_flux` (skipped if you already have the pack under any of its usual folder names).
+
+Each step is optional and non-fatal: if one fails (e.g. no network), only the nodes that need it stay disabled — re-run `python install.py` inside the pack folder to retry.
 
 > **Maintainers:** releases are automated — bumping `version` in `pyproject.toml` on `main` triggers `.github/workflows/publish_action.yml`, which publishes the new version to the registry (requires the `REGISTRY_ACCESS_TOKEN` repo secret).
 
@@ -56,35 +65,29 @@ The node pack is published to the [ComfyUI Registry](https://registry.comfy.org)
    sudo apt-get update && sudo apt-get install build-essential ffmpeg libsm6 libxext6 -y
    ```
 
-3. **Python Requirements**:
+3. **Python Requirements + optional dependencies** — one command sets up everything (base requirements, vggt, the SHARP submodule, gsplat, and the `inpainting_flux` sibling pack):
 
    ```bash
-   pip install -r custom_nodes/camera-comfyUI/requirements.txt
+   cd custom_nodes/camera-comfyUI && python install.py
    ```
 
-   * *Optional:* `open3d` for GUI point cloud tools.
+   This is the same script ComfyUI-Manager runs automatically; it is idempotent, and every optional step is non-fatal.
 
-   **Optional dependencies** (only needed for specific nodes):
+   **What it covers** (for reference — no manual action needed):
 
-   * **gsplat** — CUDA-accelerated Gaussian splat rasterizer. Required by `SplatPolish` and used as the fast render backend for `RenderSplat` / `RenderSplats4D*`. Needs a CUDA GPU and a matching PyTorch build: `pip install gsplat`.
-   * **vggt** — camera pose + depth estimation (`VideoPoseEstimator`). Install with `pip install vggt` (or `pip install git+https://github.com/facebookresearch/vggt.git`), or clone [facebookresearch/vggt](https://github.com/facebookresearch/vggt) as a sibling folder in your ComfyUI root. The `facebook/VGGT-1B` weights (~5 GB) download via `huggingface_hub` on first use.
-   * **CoTracker3** — point tracking for `EstimateTracks`. No manual install: it is fetched automatically via `torch.hub` on first use.
-   * **SHARP** — image→splat prediction (`ImageToSplat`, `FisheyeToGaussian`, `VideoToFusedSplats`, `SplatTrajectoryEnricher`). Ships as the existing git submodule at `submodules/ml-sharpt` ([apple/ml-sharp](https://github.com/apple/ml-sharp)) — run `git submodule update --init` after cloning.
+   * **gsplat** — CUDA-accelerated Gaussian splat rasterizer. Required by `SplatPolish`, SHARP, and the fast render backend for `RenderSplat` / `RenderSplats4D*`. Kernels JIT-compile on first use (needs a CUDA GPU + matching PyTorch build).
+   * **vggt** — camera pose + depth estimation (`VideoPoseEstimator`). Not on PyPI — installed with `pip install git+https://github.com/facebookresearch/vggt.git`. A sibling clone of [facebookresearch/vggt](https://github.com/facebookresearch/vggt) in your ComfyUI root also works. The `facebook/VGGT-1B` weights (~5 GB) download via `huggingface_hub` on first use.
+   * **CoTracker3** — point tracking for `EstimateTracks`. Fetched automatically via `torch.hub` on first use.
+   * **SHARP** — image→splat prediction (`ImageToSplat`, `FisheyeToGaussian`, `VideoToFusedSplats`, `SplatTrajectoryEnricher`). Lives as the git submodule at `submodules/ml-sharpt` ([apple/ml-sharp](https://github.com/apple/ml-sharp)); `install.py` initializes it for you.
+   * **ComfyUI-Flux-Inpainting** — cloned into `custom_nodes/inpainting_flux` if missing. Any of the usual folder names (`inpainting_flux`, `ComfyUI-Flux-Inpainting`, `ComfyUI-Flux-Inpainting-main`) is detected — no renaming needed.
 
-4. **Additional Nodes** (for certain workflows):
+4. **Additional Nodes** (only for some example workflows):
 
-   * Clone the following repositories directly into your `custom_nodes` folder:
-     * [ComfyUI-Flux-Inpainting](https://github.com/rubi-du/ComfyUI-Flux-Inpainting)
-     * [ComfyUI-Image-Filters](https://github.com/spacepxl/ComfyUI-Image-Filters)
-   * **Important:** If the `ComfyUI-Flux-Inpainting` repository is cloned as `ComfyUI-Flux-Inpainting-main`, rename the folder to `inpainting_flux`:
-     ```bash
-     mv custom_nodes/ComfyUI-Flux-Inpainting-main custom_nodes/inpainting_flux
-     ```
+   * [ComfyUI-Image-Filters](https://github.com/spacepxl/ComfyUI-Image-Filters) — install via Manager or clone into `custom_nodes`.
 
-5. **Flux Models** (Hugging Face):
+5. **Flux Models** (Hugging Face, only for gated models):
 
    ```bash
-   pip install huggingface_hub
    huggingface-cli login
    ```
 

@@ -29,6 +29,9 @@ install_camera_node() {
   git clone https://github.com/Alexankharin/camera-comfyUI.git \
     ComfyUI/custom_nodes/camera-comfyUI
   pip3 install -r ComfyUI/custom_nodes/camera-comfyUI/requirements.txt
+  # install.py sets up vggt, the SHARP submodule, gsplat and the
+  # inpainting_flux sibling pack (same script ComfyUI-Manager runs).
+  ( cd ComfyUI/custom_nodes/camera-comfyUI && python3 install.py )
 }
 
 install_image_filters() {
@@ -133,7 +136,6 @@ case "$MODE" in
     install_system_deps
     clone_and_install_comfyui
     install_camera_node
-    clone_flux_inpainting
     install_image_filters
     install_comfyui_manager
     install_hf_hub
@@ -145,7 +147,6 @@ case "$MODE" in
     install_system_deps
     clone_and_install_comfyui
     install_camera_node
-    clone_flux_inpainting
     install_image_filters
     install_comfyui_manager
     install_hf_hub

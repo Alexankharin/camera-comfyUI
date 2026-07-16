@@ -527,7 +527,8 @@ def _extract_f_rest(data: Dict[str, np.ndarray]) -> Tuple[np.ndarray, int]:
 def _ensure_sharp_available() -> None:
     if not _SHARP_AVAILABLE:
         raise ModuleNotFoundError(
-            f"ml-sharpt is unavailable. Ensure submodules/ml-sharpt is present and its dependencies are installed. "
+            f"ml-sharpt is unavailable. Run this pack's install.py (ComfyUI-Manager does this "
+            f"automatically) to fetch submodules/ml-sharpt and its dependencies (incl. gsplat). "
             f"Import error: {_SHARP_IMPORT_ERROR}"
         )
 

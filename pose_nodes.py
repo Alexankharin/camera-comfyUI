@@ -174,9 +174,10 @@ def _import_vggt() -> Tuple[Any, Any]:
         return VGGT, pose_encoding_to_extri_intri
     except ImportError as exc:
         raise ModuleNotFoundError(
-            "VGGT is not installed. Install it with `pip install vggt` (or "
-            "`pip install git+https://github.com/facebookresearch/vggt.git`), or clone "
-            f"https://github.com/facebookresearch/vggt into {vggt_clone_path!r}. "
+            "VGGT is not installed. Run this pack's install.py (ComfyUI-Manager does this "
+            "automatically), or install it manually with "
+            "`pip install git+https://github.com/facebookresearch/vggt.git` (it is not on PyPI), "
+            f"or clone https://github.com/facebookresearch/vggt into {vggt_clone_path!r}. "
             "It also requires `huggingface_hub` to download the facebook/VGGT-1B weights."
         ) from exc
 
