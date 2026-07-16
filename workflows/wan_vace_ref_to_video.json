@@ -1,7 +1,7 @@
 {
   "id": "0898f6a6-2814-4ccd-968a-a2405ee177e7",
   "revision": 0,
-  "last_node_id": 85,
+  "last_node_id": 86,
   "last_link_id": 152,
   "nodes": [
     {
@@ -495,7 +495,8 @@
         81,
         1,
         1
-      ]
+      ],
+      "title": "WAN VACE control"
     },
     {
       "id": 63,
@@ -780,7 +781,7 @@
         "widget_ue_connectable": {}
       },
       "widgets_values": [
-        "wan2,1_vace14B_fp16.safetensors",
+        "wan2.1_vace_14B_fp16.safetensors",
         "default"
       ]
     },
@@ -1051,7 +1052,8 @@
         0,
         true,
         false
-      ]
+      ],
+      "title": "Render control frames + masks"
     },
     {
       "id": 85,
@@ -1082,6 +1084,30 @@
         24,
         32
       ]
+    },
+    {
+      "id": 86,
+      "type": "MarkdownNote",
+      "title": "About this workflow",
+      "pos": [
+        -1085.614501953125,
+        34.52389907836914
+      ],
+      "size": [
+        520,
+        262
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "properties": {},
+      "widgets_values": [
+        "# WAN VACE: still image + camera move → video\n\nTurns a single 180° fisheye still into a camera-move video: metric depth → point cloud → **CameraMotionNode** renders point-splat frames and masks along a loaded trajectory; these become the VACE control video/masks with the original image as the reference, and WAN 2.1 VACE 14B synthesizes the final clip from your prompt.\n\n- **Set:** fisheye image; trajectory file (record one with SaveTrajectory); the positive prompt.\n- **Requires:** WAN 2.1 VACE models (install.sh `vae`), Depth-Anything V2, VideoHelperSuite (only for the h264/MP4 export — SaveWEBM works without it).\n- **Fixed 2026-07:** the UNET filename contained a typo (`wan2,1_vace14B` → `wan2.1_vace_14B_fp16.safetensors`)."
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
     }
   ],
   "links": [
@@ -1318,7 +1344,60 @@
       "IMAGE"
     ]
   ],
-  "groups": [],
+  "groups": [
+    {
+      "id": 1,
+      "title": "1. Fisheye image → point cloud",
+      "bounding": [
+        -545.614501953125,
+        357.1524963378906,
+        1213.47607421875,
+        760.8647155761719
+      ],
+      "color": "#3f789e",
+      "font_size": 24,
+      "flags": {}
+    },
+    {
+      "id": 2,
+      "title": "2. Camera-motion control video",
+      "bounding": [
+        -28.916632652282715,
+        970.2586669921875,
+        1234.2812566757202,
+        456.984619140625
+      ],
+      "color": "#a1309b",
+      "font_size": 24,
+      "flags": {}
+    },
+    {
+      "id": 3,
+      "title": "3. WAN VACE generation",
+      "bounding": [
+        -35.783010482788086,
+        -25.47610092163086,
+        1676.566946029663,
+        968.7900657653809
+      ],
+      "color": "#8A8",
+      "font_size": 24,
+      "flags": {}
+    },
+    {
+      "id": 4,
+      "title": "4. Save",
+      "bounding": [
+        1361.3507080078125,
+        107.86778259277344,
+        998.1239013671875,
+        914.3678741455078
+      ],
+      "color": "#b58b2a",
+      "font_size": 24,
+      "flags": {}
+    }
+  ],
   "config": {},
   "extra": {
     "ds": {

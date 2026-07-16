@@ -1,7 +1,7 @@
 {
   "id": "6a6957a6-60ed-4027-9a58-b0b7a511139f",
   "revision": 0,
-  "last_node_id": 75,
+  "last_node_id": 76,
   "last_link_id": 151,
   "nodes": [
     {
@@ -44,7 +44,9 @@
         "ver": "bc358f82634eb51b60207e1a8ddd5b29aaaaa2ae",
         "Node name for S&R": "CameraInterpolationNode"
       },
-      "widgets_values": []
+      "widgets_values": [
+        2
+      ]
     },
     {
       "id": 30,
@@ -432,7 +434,8 @@
         81,
         1,
         1
-      ]
+      ],
+      "title": "WAN VACE control"
     },
     {
       "id": 35,
@@ -1018,7 +1021,8 @@
         1.0000000000000002,
         0,
         -16.666717529296875
-      ]
+      ],
+      "title": "Final camera pose (edit me)"
     },
     {
       "id": 61,
@@ -1371,7 +1375,8 @@
         3,
         1,
         1
-      ]
+      ],
+      "title": "Re-render along trajectory"
     },
     {
       "id": 4,
@@ -1715,6 +1720,30 @@
       ],
       "color": "#232",
       "bgcolor": "#353"
+    },
+    {
+      "id": 76,
+      "type": "MarkdownNote",
+      "title": "About this workflow",
+      "pos": [
+        -1439.115966796875,
+        -1016.3375854492188
+      ],
+      "size": [
+        520,
+        392
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "properties": {},
+      "widgets_values": [
+        "# Re-shoot a video with a new camera move\n\nRe-renders an input video along a user-defined camera trajectory and uses WAN 2.1 VACE to regenerate what the new camera reveals:\n\n1. Video is padded square and depth-estimated per frame (Video-Depth-Anything metric).\n2. **VideoCameraMotionSequence** lifts each frame to a point cloud and re-renders it along the SE(3)-interpolated trajectory.\n3. Disocclusion masks + the re-rendered frames become VACE control video/masks; **Florence2** auto-captions the clip as the prompt; WAN 2.1 VACE 14B fills the gaps.\n\n- **Set:** video path (VHS Load Video Path); the camera move (two TransformToMatrix poses); override the auto-caption in CLIPTextEncode if desired.\n- **Requires (packs):** VideoHelperSuite, ComfyUI-Florence2, KJNodes (GetImageRangeFromBatch), ComfyUI-Easy-Use (math), ComfyUI-Image-Filters (BlurMaskFast).\n- **Requires (models):** `metric_video_depth_anything_vitl.pth` (install.sh `depth`), WAN 2.1 VACE 14B + umt5-xxl + WAN VAE (install.sh `vae`), Florence-2 (auto-download).\n- **Outputs:** re-rendered composite WEBM, depth WEBM, final VACE clip."
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
     }
   ],
   "links": [
@@ -2111,7 +2140,99 @@
       "IMAGE"
     ]
   ],
-  "groups": [],
+  "groups": [
+    {
+      "id": 1,
+      "title": "1. Load & pad video",
+      "bounding": [
+        -899.115966796875,
+        -12.527397155761719,
+        1236.9286651611328,
+        1029.809471130371
+      ],
+      "color": "#3f789e",
+      "font_size": 24,
+      "flags": {}
+    },
+    {
+      "id": 2,
+      "title": "2. Metric video depth",
+      "bounding": [
+        -376.9869384765625,
+        436.6513671875,
+        645.8890285491943,
+        255.26275634765625
+      ],
+      "color": "#a1309b",
+      "font_size": 24,
+      "flags": {}
+    },
+    {
+      "id": 3,
+      "title": "3. Re-render with new camera",
+      "bounding": [
+        -310.3587646484375,
+        426.8964538574219,
+        978.3455200195312,
+        817.5969543457031
+      ],
+      "color": "#8A8",
+      "font_size": 24,
+      "flags": {}
+    },
+    {
+      "id": 4,
+      "title": "4. Masks & composite",
+      "bounding": [
+        701.5014038085938,
+        382.5711669921875,
+        964.6873168945312,
+        617.3826904296875
+      ],
+      "color": "#b58b2a",
+      "font_size": 24,
+      "flags": {}
+    },
+    {
+      "id": 5,
+      "title": "5. Auto-caption (Florence2)",
+      "bounding": [
+        402.0513000488281,
+        -1076.3375854492188,
+        915.5072937011719,
+        674.8928833007812
+      ],
+      "color": "#88A",
+      "font_size": 24,
+      "flags": {}
+    },
+    {
+      "id": 6,
+      "title": "6. WAN VACE re-generation",
+      "bounding": [
+        -252.87193298339844,
+        -580.986328125,
+        2209.4490814208984,
+        931.6179580688477
+      ],
+      "color": "#b06634",
+      "font_size": 24,
+      "flags": {}
+    },
+    {
+      "id": 7,
+      "title": "7. Outputs",
+      "bounding": [
+        782.4984130859375,
+        -267.39794921875,
+        1570.5733642578125,
+        1506.2070922851562
+      ],
+      "color": "#535",
+      "font_size": 24,
+      "flags": {}
+    }
+  ],
   "config": {},
   "extra": {
     "ds": {

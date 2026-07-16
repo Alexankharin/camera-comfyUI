@@ -219,23 +219,27 @@ Turn a monocular video into a navigable 4D (3D + time) Gaussian splat scene and 
 
 ## Workflows
 
-A set of JSON workflows illustrating typical use cases. Each workflow lives in `workflows/` and can be loaded directly in ComfyUI.
+A set of JSON workflows illustrating typical use cases. Each workflow lives in `workflows/`, can be loaded directly in ComfyUI, and contains an embedded **“About this workflow”** note in the canvas explaining its stages, what to set, and what it needs. *Extras* below means dependencies beyond this pack and Depth-Anything V2 (which auto-downloads); `inpainting_flux` is installed automatically by `install.py`.
 
-| Workflow                               | Description                                                    |
-| -------------------------------------- | -------------------------------------------------------------- |
-| **demo\_camera\_workflow\.json**       | Masked reprojection demo: pinhole → fisheye/equirect           |
-| **outpainting\_fisheye.json**          | Text‐guided fisheye outpainting (built‐in inpaint node)        |
-| **outpainting\_fisheye\_flux.json**    | Flux‐based outpainting with clear reprojection scheme          |
-| **Outpaint\_node\_test.json**          | Test harness for the universal outpaint node                   |
-| **Outpaint\_fisheye180.json**          | 180° fisheye outpainting via `OutpaintAnyProjection`           |
-| **Fisheye\_depth\_workflow\.json**     | Fisheye → metric depth → point cloud → PLY export              |
-| **Pointcloud.json**                    | Metric‐depth‐anything v2 → point cloud → camera view synthesis |
-| **pointcloud\_inpaint.json**           | Inpaint + backproject to 3D for dynamic camera motion videos   |
-| **Pointcloud\_walker.json**            | GUI‐based camera control via Open3D                            |
-| **sbs180\_workflow.json**              | Generate stereo (side-by-side) wide-angle/fisheye/equirectangular stereo pairs from a high-res input |
-| **video_camera.json**                  | Camera trajectory movement workflow using `wan-vace` for video inpainting. |
-| **video_to_4d_world\.json**            | Video → 4D world: VGGT poses/depth → motion masking → fused static splats + polish → tracked dynamic 4D Gaussians → novel-trajectory render. |
-| **video_to_4d_walkable_world\.json**   | Video → 4D WALKABLE world (test-friendly defaults): polished static splats enriched along a walk trajectory (`SplatTrajectoryEnricher`, Flux outpaint + SHARP) → 4D scene → walk-through render + `.ply`/`.npz` exports for free walking in external 3DGS viewers. |
+| Workflow | Description | Extras |
+| --- | --- | --- |
+| **demo\_camera\_workflow\.json** | Minimal demo: rotate the camera and reproject pinhole → equirectangular, with coverage mask | — |
+| **Outpaint\_node\_test.json** | One-patch smoke test of `OutpaintAnyProjection` | inpainting_flux |
+| **Outpaint\_fisheye180.json** | Pinhole 90° → full 180° fisheye via five chained `OutpaintAnyProjection` passes + composite/upscale | inpainting_flux |
+| **outpainting\_fisheye\_flux.json** | Manual version of the above: explicit Flux Inpainting + reprojection stages | inpainting_flux, RealESRGAN |
+| **outpainting\_fisheye.json**          | Same pipeline with a classic SD inpainting checkpoint instead of Flux | SD inpaint ckpt, RealESRGAN |
+| **Fisheye\_depth\_workflow\.json** | Reference graph: multi-view fisheye depth fusion done node-by-node (now built into `FisheyeDepthEstimator`) | — |
+| **fisheye\_to\_pointcloud.json** | Fisheye 180° → metric depth → point cloud (`.ply`/`.npy`) | — |
+| **PointCloud.json** | Single image → point cloud → cleaned novel-view render | Image-Filters (optional) |
+| **pointcloud\_walker.json** | Image → point cloud → camera fly-through WEBM | — |
+| **test\_pointcloud\_loading.json** | Reload a saved point cloud and orbit-render it | — |
+| **pointcloud\_inpaint.json** | Enrich a cloud: Flux-inpaint disocclusions, lift them to 3D, merge, orbit render | inpainting_flux |
+| **PC\_enricher.json** | One-node version of the above: `PointcloudTrajectoryEnricher` along a saved trajectory | inpainting_flux |
+| **sbs180\_workflow.json** | Synthesize the second eye of a VR180 stereo pair from one fisheye view | inpainting_flux |
+| **video\_camera.json** | Re-shoot a video with a new camera move; WAN VACE regenerates disocclusions, Florence2 auto-captions | VHS, Florence2, KJNodes, Easy-Use, Image-Filters; WAN 2.1 VACE + Video-Depth-Anything models |
+| **wan\_vace\_ref\_to\_video.json** | Still fisheye image + recorded trajectory → WAN VACE camera-move video | WAN 2.1 VACE models; VHS (optional MP4 export) |
+| **video_to_4d_world\.json**            | Video → 4D world: VGGT poses/depth → motion masking → fused static splats + polish → tracked dynamic 4D Gaussians → novel-trajectory render. | — |
+| **video_to_4d_walkable_world\.json**   | Video → 4D WALKABLE world (test-friendly defaults): polished static splats enriched along a walk trajectory (`SplatTrajectoryEnricher`, Flux outpaint + SHARP) → 4D scene → walk-through render + `.ply`/`.npz` exports for free walking in external 3DGS viewers. | inpainting_flux |
 
 ---
 
@@ -280,7 +284,7 @@ Convert fisheye images to metric depth and generate a PLY point cloud.
 
 Quick test for the universal outpaint node in arbitrary views and camera movement
 
-### 7. `Pointcloud.json`
+### 7. `PointCloud.json`
 
 Depth→PointCloud pipeline with interactive camera movement and reprojection views.
 
@@ -300,9 +304,9 @@ Take a wide-angle (fisheye or equirectangular) high-resolution (e.g., 4096×4096
 
 <img src="demo_images/equirect_stereo.gif" alt="Equirectangular Stereo Demo" width="80%" />
 
-### 10. `Pointcloud_walker.json`
+### 10. `pointcloud_walker.json`
 
-Interactive Open3D-based GUI for walking and setting camera trajectory inside pointcloud.
+Image → point cloud → camera fly-through rendered to WEBM (`CameraTrajectoryNode` + `CameraMotionNode`).
 
 ### 11. `video_camera.json`
 
