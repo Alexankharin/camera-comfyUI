@@ -39,7 +39,7 @@
         "Node name for S&R": "LoadImage"
       },
       "widgets_values": [
-        "example.png",
+        "camera_example_pinhole.jpg",
         "image",
         ""
       ]
@@ -324,7 +324,8 @@
         806.6857406850668,
         -309.49182798364893
       ]
-    }
+    },
+    "camera_comfyui_rev": 1
   },
   "version": 0.4
 }

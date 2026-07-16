@@ -208,142 +208,6 @@
       ]
     },
     {
-      "id": 26,
-      "type": "easy mathInt",
-      "pos": [
-        -358.4687805175781,
-        47.47260284423828
-      ],
-      "size": [
-        270,
-        106
-      ],
-      "flags": {},
-      "order": 13,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "a",
-          "type": "INT",
-          "widget": {
-            "name": "a"
-          },
-          "link": 28
-        },
-        {
-          "name": "b",
-          "type": "INT",
-          "widget": {
-            "name": "b"
-          },
-          "link": 29
-        }
-      ],
-      "outputs": [
-        {
-          "name": "INT",
-          "type": "INT",
-          "links": [
-            30
-          ]
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfyui-easy-use",
-        "ver": "1.3.0",
-        "Node name for S&R": "easy mathInt"
-      },
-      "widgets_values": [
-        0,
-        0,
-        "subtract"
-      ]
-    },
-    {
-      "id": 23,
-      "type": "VHS_VideoInfo",
-      "pos": [
-        -582.7188720703125,
-        224.42620849609375
-      ],
-      "size": [
-        225.59765625,
-        206
-      ],
-      "flags": {},
-      "order": 11,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "video_info",
-          "type": "VHS_VIDEOINFO",
-          "link": 25
-        }
-      ],
-      "outputs": [
-        {
-          "name": "source_fps🟨",
-          "type": "FLOAT",
-          "links": []
-        },
-        {
-          "name": "source_frame_count🟨",
-          "type": "INT",
-          "links": []
-        },
-        {
-          "name": "source_duration🟨",
-          "type": "FLOAT",
-          "links": null
-        },
-        {
-          "name": "source_width🟨",
-          "type": "INT",
-          "links": [
-            28
-          ]
-        },
-        {
-          "name": "source_height🟨",
-          "type": "INT",
-          "links": [
-            29
-          ]
-        },
-        {
-          "name": "loaded_fps🟦",
-          "type": "FLOAT",
-          "links": null
-        },
-        {
-          "name": "loaded_frame_count🟦",
-          "type": "INT",
-          "links": null
-        },
-        {
-          "name": "loaded_duration🟦",
-          "type": "FLOAT",
-          "links": null
-        },
-        {
-          "name": "loaded_width🟦",
-          "type": "INT",
-          "links": null
-        },
-        {
-          "name": "loaded_height🟦",
-          "type": "INT",
-          "links": null
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfyui-videohelpersuite",
-        "ver": "a7ce59e381934733bfae03b1be029756d6ce936d",
-        "Node name for S&R": "VHS_VideoInfo"
-      },
-      "widgets_values": {}
-    },
-    {
       "id": 28,
       "type": "WanVaceToVideo",
       "pos": [
@@ -569,7 +433,7 @@
     },
     {
       "id": 63,
-      "type": "GetImageRangeFromBatch",
+      "type": "ImageFromBatch",
       "pos": [
         583.0528564453125,
         -1016.3375854492188
@@ -583,7 +447,7 @@
       "mode": 0,
       "inputs": [
         {
-          "name": "images",
+          "name": "image",
           "shape": 7,
           "type": "IMAGE",
           "link": 116
@@ -612,12 +476,13 @@
       "properties": {
         "cnr_id": "comfyui-kjnodes",
         "ver": "d57154c3a808b8a3f232ed293eaa2d000867c884",
-        "Node name for S&R": "GetImageRangeFromBatch"
+        "Node name for S&R": "ImageFromBatch"
       },
       "widgets_values": [
         0,
         1
-      ]
+      ],
+      "title": "First frame (for captioning)"
     },
     {
       "id": 62,
@@ -759,51 +624,6 @@
       ]
     },
     {
-      "id": 27,
-      "type": "easy mathInt",
-      "pos": [
-        -29.064062118530273,
-        56.160377502441406
-      ],
-      "size": [
-        270,
-        106
-      ],
-      "flags": {},
-      "order": 15,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "a",
-          "type": "INT",
-          "widget": {
-            "name": "a"
-          },
-          "link": 30
-        }
-      ],
-      "outputs": [
-        {
-          "name": "INT",
-          "type": "INT",
-          "links": [
-            31,
-            32
-          ]
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfyui-easy-use",
-        "ver": "1.3.0",
-        "Node name for S&R": "easy mathInt"
-      },
-      "widgets_values": [
-        0,
-        2,
-        "divide"
-      ]
-    },
-    {
       "id": 19,
       "type": "ImageScale",
       "pos": [
@@ -865,22 +685,6 @@
           "name": "image",
           "type": "IMAGE",
           "link": 22
-        },
-        {
-          "name": "top",
-          "type": "INT",
-          "widget": {
-            "name": "top"
-          },
-          "link": 31
-        },
-        {
-          "name": "bottom",
-          "type": "INT",
-          "widget": {
-            "name": "bottom"
-          },
-          "link": 32
         }
       ],
       "outputs": [
@@ -910,7 +714,8 @@
         0,
         280,
         1
-      ]
+      ],
+      "title": "Pad to square — set top/bottom to (W−H)/2"
     },
     {
       "id": 68,
@@ -1142,9 +947,7 @@
         {
           "name": "video_info",
           "type": "VHS_VIDEOINFO",
-          "links": [
-            25
-          ]
+          "links": []
         }
       ],
       "properties": {
@@ -1223,45 +1026,6 @@
         "metric_video_depth_anything_vitl.pth",
         518,
         60
-      ]
-    },
-    {
-      "id": 60,
-      "type": "BlurMaskFast",
-      "pos": [
-        1376.188720703125,
-        442.5711669921875
-      ],
-      "size": [
-        270,
-        82
-      ],
-      "flags": {},
-      "order": 25,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "masks",
-          "type": "MASK",
-          "link": 111
-        }
-      ],
-      "outputs": [
-        {
-          "name": "MASK",
-          "type": "MASK",
-          "links": []
-        }
-      ],
-      "properties": {
-        "cnr_id": "ComfyUI-Image-Filters",
-        "ver": "5abb3c2395739e0b94c2061bbc49bd1349de97c4",
-        "Node name for S&R": "BlurMaskFast",
-        "aux_id": "spacepxl/ComfyUI-Image-Filters"
-      },
-      "widgets_values": [
-        0,
-        0
       ]
     },
     {
@@ -1438,7 +1202,6 @@
           "name": "MASK",
           "type": "MASK",
           "links": [
-            111,
             144,
             145,
             149
@@ -1740,7 +1503,7 @@
       "outputs": [],
       "properties": {},
       "widgets_values": [
-        "# Re-shoot a video with a new camera move\n\nRe-renders an input video along a user-defined camera trajectory and uses WAN 2.1 VACE to regenerate what the new camera reveals:\n\n1. Video is padded square and depth-estimated per frame (Video-Depth-Anything metric).\n2. **VideoCameraMotionSequence** lifts each frame to a point cloud and re-renders it along the SE(3)-interpolated trajectory.\n3. Disocclusion masks + the re-rendered frames become VACE control video/masks; **Florence2** auto-captions the clip as the prompt; WAN 2.1 VACE 14B fills the gaps.\n\n- **Set:** video path (VHS Load Video Path); the camera move (two TransformToMatrix poses); override the auto-caption in CLIPTextEncode if desired.\n- **Requires (packs):** VideoHelperSuite, ComfyUI-Florence2, KJNodes (GetImageRangeFromBatch), ComfyUI-Easy-Use (math), ComfyUI-Image-Filters (BlurMaskFast).\n- **Requires (models):** `metric_video_depth_anything_vitl.pth` (install.sh `depth`), WAN 2.1 VACE 14B + umt5-xxl + WAN VAE (install.sh `vae`), Florence-2 (auto-download).\n- **Outputs:** re-rendered composite WEBM, depth WEBM, final VACE clip."
+        "# Re-shoot a video with a new camera move\n\nRe-renders an input video along a user-defined camera trajectory and uses WAN 2.1 VACE to regenerate what the new camera reveals:\n\n1. Video is padded square (ImagePadForOutpaint — set top/bottom to (width−height)/2 for your video) and depth-estimated per frame (Video-Depth-Anything metric).\n2. **VideoCameraMotionSequence** lifts each frame to a point cloud and re-renders it along the SE(3)-interpolated trajectory.\n3. Disocclusion masks + re-rendered frames become VACE control video/masks; **Florence2** auto-captions the clip as the prompt; WAN 2.1 VACE 14B fills the gaps.\n\n- **Set:** video path (VHS Load Video Path); the camera move (two TransformToMatrix poses); pad amounts; override the auto-caption in CLIPTextEncode if desired.\n- **Requires (packs):** VideoHelperSuite, ComfyUI-Florence2.\n- **Requires (models):** `metric_video_depth_anything_vitl.pth` (install.sh `depth`), WAN 2.1 VACE 14B + umt5-xxl + WAN VAE (install.sh `vae`), Florence-2 (auto-download).\n- **Outputs:** re-rendered composite WEBM, depth WEBM, final VACE clip."
       ],
       "color": "#432",
       "bgcolor": "#653"
@@ -1826,54 +1589,6 @@
       19,
       0,
       "IMAGE"
-    ],
-    [
-      25,
-      9,
-      3,
-      23,
-      0,
-      "VHS_VIDEOINFO"
-    ],
-    [
-      28,
-      23,
-      3,
-      26,
-      0,
-      "INT"
-    ],
-    [
-      29,
-      23,
-      4,
-      26,
-      1,
-      "INT"
-    ],
-    [
-      30,
-      26,
-      0,
-      27,
-      0,
-      "INT"
-    ],
-    [
-      31,
-      27,
-      0,
-      21,
-      1,
-      "INT"
-    ],
-    [
-      32,
-      27,
-      0,
-      21,
-      2,
-      "INT"
     ],
     [
       35,
@@ -2002,14 +1717,6 @@
       35,
       1,
       "VAE"
-    ],
-    [
-      111,
-      41,
-      0,
-      60,
-      0,
-      "MASK"
     ],
     [
       113,
@@ -2146,9 +1853,9 @@
       "title": "1. Load & pad video",
       "bounding": [
         -899.115966796875,
-        -12.527397155761719,
+        135.00233459472656,
         1236.9286651611328,
-        1029.809471130371
+        882.2797393798828
       ],
       "color": "#3f789e",
       "font_size": 24,
@@ -2185,9 +1892,9 @@
       "title": "4. Masks & composite",
       "bounding": [
         701.5014038085938,
-        382.5711669921875,
-        964.6873168945312,
-        617.3826904296875
+        437.3684387207031,
+        313.2791748046875,
+        562.5854187011719
       ],
       "color": "#b58b2a",
       "font_size": 24,
@@ -2246,7 +1953,8 @@
     "VHS_latentpreview": false,
     "VHS_latentpreviewrate": 0,
     "VHS_MetadataImage": true,
-    "VHS_KeepIntermediate": true
+    "VHS_KeepIntermediate": true,
+    "camera_comfyui_rev": 1
   },
   "version": 0.4
 }

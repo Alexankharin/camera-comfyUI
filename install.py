@@ -155,12 +155,39 @@ def ensure_flux_inpainting_pack() -> None:
     _log("ComfyUI-Flux-Inpainting installed as custom_nodes/inpainting_flux")
 
 
+def ensure_example_inputs() -> None:
+    """Copy bundled example inputs into ComfyUI's input dir (no overwrite).
+
+    The shipped example workflows reference these files, so a fresh install
+    can queue them immediately.
+    """
+    src_dir = os.path.join(NODE_DIR, "example_inputs")
+    if not os.path.isdir(src_dir):
+        _log("no example_inputs directory; skipping")
+        return
+    custom_nodes_dir = os.path.dirname(NODE_DIR)
+    if os.path.basename(custom_nodes_dir).lower() != "custom_nodes":
+        _log("not installed under a ComfyUI custom_nodes directory; "
+             "skipping example input setup")
+        return
+    input_dir = os.path.join(os.path.dirname(custom_nodes_dir), "input")
+    os.makedirs(input_dir, exist_ok=True)
+    copied = 0
+    for name in os.listdir(src_dir):
+        target = os.path.join(input_dir, name)
+        if not os.path.exists(target):
+            shutil.copy2(os.path.join(src_dir, name), target)
+            copied += 1
+    _log(f"example inputs ready ({copied} file(s) copied to {input_dir})")
+
+
 STEPS = (
     ("base requirements", ensure_base_requirements),
     ("vggt (VideoPoseEstimator)", ensure_vggt),
     ("SHARP checkout (ImageToSplat)", ensure_sharp_checkout),
     ("gsplat (splat rasterizer)", ensure_gsplat),
     ("ComfyUI-Flux-Inpainting (OutpaintAnyProjection)", ensure_flux_inpainting_pack),
+    ("example workflow inputs", ensure_example_inputs),
 )
 
 

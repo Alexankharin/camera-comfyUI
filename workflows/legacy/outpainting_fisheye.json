@@ -71,7 +71,6 @@
           "name": "MASK",
           "type": "MASK",
           "links": [
-            106,
             107,
             115
           ]
@@ -1215,9 +1214,7 @@
           "type": "IMAGE",
           "slot_index": 0,
           "links": [
-            152,
             159,
-            160,
             161
           ]
         }
@@ -1656,7 +1653,6 @@
           "type": "IMAGE",
           "slot_index": 0,
           "links": [
-            90,
             96
           ]
         },
@@ -1674,7 +1670,7 @@
         "ver": "0.3.18"
       },
       "widgets_values": [
-        "flux_dev_example.png",
+        "camera_example_pinhole.jpg",
         "image"
       ]
     },
@@ -2313,7 +2309,8 @@
         1318.469408822689,
         -713.7676873487386
       ]
-    }
+    },
+    "camera_comfyui_rev": 1
   },
   "version": 0.4
 }

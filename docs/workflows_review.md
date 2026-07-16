@@ -47,47 +47,50 @@ Every workflow now carries an embedded **“About this workflow”** MarkdownNot
 (purpose, stages, what to set, required packs/models), meaningful group boxes,
 and titles on the nodes users are expected to edit.
 
-## Proposed improvements (not applied)
+## Improvements — applied 2026-07-16
 
-1. **Ship runnable defaults.** Most workflows reference user-local inputs
-   (`initial.png`, `Ironcrop.mp4`, `Saved_fisheye_00001_.png`). Bundle one
-   small CC0 example image/video in `demo_images/` and point every LoadImage
-   at it so a fresh install can hit *Queue* immediately.
-2. **Expose workflows in ComfyUI's template browser.** The frontend picks up
-   an `example_workflows/` directory inside a custom-node pack. Renaming
-   `workflows/` → `example_workflows/` (or copying at publish time via
-   `[tool.comfy].includes`) makes every workflow discoverable from the UI
-   instead of requiring manual JSON loading.
-3. **Trim exotic dependencies from `video_camera.json`.** It pulls five extra
-   packs; two are avoidable: `easy mathInt` (Easy-Use) only computes
-   `(w−h)/2` for padding — replaceable with core math or fixed values; KJNodes'
-   `GetImageRangeFromBatch` (grabs frame 0 for Florence2) is replaceable with
-   the built-in `ImageFromBatch` already used in the video_to_4d workflows.
-   Also: the `BlurMaskFast` node is a dead end (its output feeds nothing) —
-   remove it or wire it into `WanVaceToVideo.control_masks` as presumably
-   intended.
-4. **Consolidate the fisheye-outpaint family.** Four workflows share one idea
-   (`Outpaint_node_test`, `Outpaint_fisheye180`, `outpainting_fisheye_flux`,
-   `outpainting_fisheye`). Suggest: keep `Outpaint_fisheye180` as canonical,
-   keep the flux variant as the "how it works inside" reference, and move the
-   SD-checkpoint variant to `workflows/legacy/` (it needs a 2022-era
-   `512-inpainting-ema` checkpoint and produces the weakest results).
-5. **Same for depth:** `Fisheye_depth_workflow.json` (45 nodes) is the manual
-   expansion of the `FisheyeDepthEstimator` node — the in-canvas note now says
-   so; consider `workflows/legacy/` to keep the main folder focused.
-6. **Add a trajectory-recording workflow.** `PC_enricher.json` and
-   `wan_vace_ref_to_video.json` both *consume* `ComfyUITrajectory_00001.npy`,
-   but no workflow *produces* one — a 4-node example
-   (`TransformToMatrix ×2 → CameraInterpolationNode → SaveTrajectory`) would
-   close the loop.
-7. **Retune migrated defaults on the GPU box.** `PointCloudCleaner` (in
-   `PointCloud.json`) and the voxel-merge tail of `PointcloudTrajectoryEnricher`
-   (in `PC_enricher.json`) were reset to schema defaults; verify visual quality
-   and bake in good values.
-8. **Guard against future drift in CI.** Add a GitHub Actions job that runs
-   `notebooks/validate_workflows.py` (CPU torch) so a node-schema change that
-   breaks shipped workflows fails the PR instead of shipping silently.
-9. **Version the workflow schema.** Consider adding
-   `"extra": {"camera_comfyui_rev": N}` when saving reference workflows, so
-   future migrations can target exact revisions instead of sniffing widget
-   counts.
+Implemented by `notebooks/apply_improvements_2026_07.py` plus repo changes:
+
+1. **Runnable defaults** ✅ — `example_inputs/` ships
+   `camera_example_pinhole.jpg`, `camera_example_fisheye.jpg` and
+   `ComfyUITrajectory_00001.npy`; `install.py` copies them into ComfyUI's
+   `input/` dir (no overwrite), and every LoadImage/LoadTrajectory default
+   points at them. Exception: `video_camera.json` still needs a user video
+   (none bundled — a clip would bloat the archive).
+2. **Template browser** ✅ — `workflows/` is already an accepted template
+   directory name (per docs.comfy.org, alongside `example_workflows`), so no
+   rename was needed; added the missing same-name `.jpg` thumbnails (10
+   workflows, generated 512 px from `demo_images/`) and removed the stray
+   `workflows/__init__.py`. Legacy graphs moved to `workflows/legacy/`, which
+   keeps them out of the browser.
+3. **`video_camera.json` dep trim** ✅ — removed the dead-end `BlurMaskFast`
+   (blur radius was 0/0 — a no-op even if wired), the `easy mathInt` pad
+   computation and the then-dangling `VHS_VideoInfo`; pad top/bottom now use
+   the node's stored values (set to `(W−H)/2`, note explains); swapped
+   KJNodes' `GetImageRangeFromBatch` for the built-in `ImageFromBatch`.
+   Remaining pack deps: VideoHelperSuite + Florence2 (was five packs).
+4. **Fisheye-outpaint consolidation** ✅ — SD-checkpoint variant moved to
+   `workflows/legacy/outpainting_fisheye.json`.
+5. **Depth consolidation** ✅ — `workflows/legacy/Fisheye_depth_workflow.json`.
+6. **Trajectory recorder** ✅ — new `workflows/record_trajectory.json`
+   (TransformToMatrix ×2 → CameraInterpolationNode → SaveTrajectory), and the
+   bundled example trajectory covers the zero-setup path.
+7. **CI guard** ✅ — `.github/workflows/validate.yml` runs the workflow
+   validator, installer-logic tests and the 4D smoke suite on CPU torch for
+   every PR and push to main.
+8. **Schema versioning** ✅ — every workflow now carries
+   `extra.camera_comfyui_rev = 1`; bump on the next migration.
+9. Bonus: a bidirectional link-integrity sweep found and pruned 8 stale link
+   references (pre-existing) plus one dangling `mask` input in
+   `outpainting_fisheye_flux.json`.
+
+## Still open
+
+* **Retune migrated defaults on the GPU box.** `PointCloudCleaner` (in
+  `PointCloud.json`) and the voxel-merge tail of `PointcloudTrajectoryEnricher`
+  (in `PC_enricher.json`) were reset to schema defaults; verify visual quality
+  and bake in good values.
+* **Load-and-queue pass in real ComfyUI.** All checks here are static; open
+  each template once on the GPU box to confirm layout and execution.
+* **Bundle a small example video** for `video_camera.json` if archive size
+  allows (or document a public sample clip URL in its note).

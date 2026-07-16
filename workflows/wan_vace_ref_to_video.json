@@ -707,7 +707,7 @@
         "widget_ue_connectable": {}
       },
       "widgets_values": [
-        "Fisheye_outpainted_flux_dev.png",
+        "camera_example_fisheye.jpg",
         "image"
       ]
     },
@@ -1413,7 +1413,8 @@
     "VHS_latentpreview": false,
     "VHS_latentpreviewrate": 0,
     "VHS_MetadataImage": true,
-    "VHS_KeepIntermediate": true
+    "VHS_KeepIntermediate": true,
+    "camera_comfyui_rev": 1
   },
   "version": 0.4
 }

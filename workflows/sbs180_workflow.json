@@ -910,7 +910,7 @@
         "Node name for S&R": "LoadImage"
       },
       "widgets_values": [
-        "Fisheye_outpainted_flux_dev.png",
+        "camera_example_fisheye.jpg",
         "image"
       ]
     },
@@ -1317,7 +1317,8 @@
         -1811.182955009025
       ]
     },
-    "frontendVersion": "1.20.4"
+    "frontendVersion": "1.20.4",
+    "camera_comfyui_rev": 1
   },
   "version": 0.4
 }

@@ -1,0 +1,34 @@
+name: Validate workflows & smoke tests
+
+# Guards against node-schema drift silently breaking the shipped workflows:
+# validate_workflows.py compares every stored widgets_values against the
+# current INPUT_TYPES (see docs/workflows_review.md).
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install CPU test dependencies
+        run: |
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          pip install numpy pillow scipy tqdm
+      - name: Workflow schema validation
+        run: python notebooks/validate_workflows.py
+      - name: Installer logic tests
+        run: python notebooks/test_install_logic.py
+      - name: 4D node smoke tests
+        run: python notebooks/smoke_test_4d.py

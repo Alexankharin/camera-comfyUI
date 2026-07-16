@@ -735,7 +735,6 @@
           "name": "transformation matrix",
           "type": "MAT_4X4",
           "links": [
-            7,
             17
           ]
         }
@@ -910,7 +909,6 @@
           "name": "mask",
           "type": "MASK",
           "links": [
-            58,
             105,
             128
           ]
@@ -976,8 +974,6 @@
           "name": "IMAGE",
           "type": "IMAGE",
           "links": [
-            2,
-            11,
             41,
             114
           ]
@@ -993,7 +989,7 @@
         "Node name for S&R": "LoadImage"
       },
       "widgets_values": [
-        "initial.png",
+        "camera_example_pinhole.jpg",
         "image"
       ]
     },
@@ -1744,7 +1740,8 @@
         -479.4680770622288
       ]
     },
-    "frontendVersion": "1.18.9"
+    "frontendVersion": "1.18.9",
+    "camera_comfyui_rev": 1
   },
   "version": 0.4
 }

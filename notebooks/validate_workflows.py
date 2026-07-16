@@ -86,7 +86,8 @@ def widget_specs(cls):
 
 def main() -> int:
     problems = 0
-    for path in sorted(glob.glob(os.path.join(REPO_ROOT, "workflows", "*.json"))):
+    for path in sorted(glob.glob(os.path.join(REPO_ROOT, "workflows", "**", "*.json"),
+                                 recursive=True)):
         data = json.load(open(path, encoding="utf-8"))
         header_shown = False
 

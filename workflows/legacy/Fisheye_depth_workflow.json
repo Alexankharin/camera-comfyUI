@@ -2076,7 +2076,7 @@
         "Node name for S&R": "LoadImage"
       },
       "widgets_values": [
-        "Saved_fisheye_00001_.png",
+        "camera_example_fisheye.jpg",
         "image"
       ]
     },
@@ -3155,7 +3155,8 @@
         -1253.2919319459254
       ]
     },
-    "frontendVersion": "1.18.9"
+    "frontendVersion": "1.18.9",
+    "camera_comfyui_rev": 1
   },
   "version": 0.4
 }

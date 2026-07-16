@@ -104,6 +104,27 @@ def test_flux_pack_detects_existing_and_clones_when_missing():
     ok("flux pack: missing -> cloned as custom_nodes/inpainting_flux")
 
 
+def test_example_inputs_copied():
+    mod = load_install_module()
+    stub_commands(mod)
+    with tempfile.TemporaryDirectory() as tmp:
+        cn = os.path.join(tmp, "ComfyUI", "custom_nodes")
+        mod.NODE_DIR = os.path.join(cn, "camera-comfyUI")
+        src = os.path.join(mod.NODE_DIR, "example_inputs")
+        os.makedirs(src)
+        with open(os.path.join(src, "example.jpg"), "w") as f:
+            f.write("x")
+        input_dir = os.path.join(tmp, "ComfyUI", "input")
+        os.makedirs(input_dir)
+        with open(os.path.join(input_dir, "existing.jpg"), "w") as f:
+            f.write("keep me")
+        mod.ensure_example_inputs()
+        mod.ensure_example_inputs()  # idempotent, no overwrite
+        assert os.path.isfile(os.path.join(input_dir, "example.jpg"))
+        assert open(os.path.join(input_dir, "existing.jpg")).read() == "keep me"
+    ok("example inputs copied to ComfyUI input dir, no overwrite")
+
+
 def test_main_never_fails():
     mod = load_install_module()
 
@@ -167,6 +188,7 @@ if __name__ == "__main__":
     test_vggt_uses_https_git()
     test_flux_pack_skip_outside_comfyui()
     test_flux_pack_detects_existing_and_clones_when_missing()
+    test_example_inputs_copied()
     test_main_never_fails()
     test_flux_import_resolution()
     print(f"\n{len(PASS)} install-logic checks passed")

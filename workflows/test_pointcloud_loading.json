@@ -313,7 +313,8 @@
         -1186.3099424359816
       ]
     },
-    "frontendVersion": "1.21.7"
+    "frontendVersion": "1.21.7",
+    "camera_comfyui_rev": 1
   },
   "version": 0.4
 }

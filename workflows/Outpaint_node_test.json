@@ -107,7 +107,7 @@
         "Node name for S&R": "LoadImage"
       },
       "widgets_values": [
-        "flux_dev_example.png",
+        "camera_example_pinhole.jpg",
         "image",
         ""
       ]
@@ -282,7 +282,8 @@
         703.1897327574803,
         -308.43624510132975
       ]
-    }
+    },
+    "camera_comfyui_rev": 1
   },
   "version": 0.4
 }

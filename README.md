@@ -46,6 +46,7 @@ Installation is fully automatic: ComfyUI-Manager installs `requirements.txt` and
 * **SHARP** (`ImageToSplat`, `VideoToFusedSplats`, …) — the `submodules/ml-sharpt` checkout is bundled in the registry package (and fetched via `git submodule`/clone for git installs), and its Python deps come from `requirements.txt`.
 * **gsplat** — pip-installed; its CUDA kernels JIT-compile on first use.
 * **ComfyUI-Flux-Inpainting** (`OutpaintAnyProjection`, `SplatTrajectoryEnricher`) — cloned automatically into `custom_nodes/inpainting_flux` (skipped if you already have the pack under any of its usual folder names).
+* **Example inputs** — the sample image/trajectory files referenced by the bundled workflows are copied into ComfyUI's `input/` folder, so the templates run immediately.
 
 Each step is optional and non-fatal: if one fails (e.g. no network), only the nodes that need it stay disabled — re-run `python install.py` inside the pack folder to retry.
 
@@ -219,7 +220,9 @@ Turn a monocular video into a navigable 4D (3D + time) Gaussian splat scene and 
 
 ## Workflows
 
-A set of JSON workflows illustrating typical use cases. Each workflow lives in `workflows/`, can be loaded directly in ComfyUI, and contains an embedded **“About this workflow”** note in the canvas explaining its stages, what to set, and what it needs. *Extras* below means dependencies beyond this pack and Depth-Anything V2 (which auto-downloads); `inpainting_flux` is installed automatically by `install.py`.
+A set of JSON workflows illustrating typical use cases. Once the pack is installed they appear in ComfyUI under **Workflow → Browse Templates** (with thumbnails); the files live in `workflows/` and can also be loaded directly. Each workflow contains an embedded **“About this workflow”** note in the canvas explaining its stages, what to set, and what it needs — and references the bundled example inputs that `install.py` copies into your ComfyUI `input/` folder, so they run as-is on a fresh install.
+
+*Extras* below means dependencies beyond this pack and Depth-Anything V2 (which auto-downloads); `inpainting_flux` is installed automatically by `install.py`.
 
 | Workflow | Description | Extras |
 | --- | --- | --- |
@@ -227,19 +230,20 @@ A set of JSON workflows illustrating typical use cases. Each workflow lives in `
 | **Outpaint\_node\_test.json** | One-patch smoke test of `OutpaintAnyProjection` | inpainting_flux |
 | **Outpaint\_fisheye180.json** | Pinhole 90° → full 180° fisheye via five chained `OutpaintAnyProjection` passes + composite/upscale | inpainting_flux |
 | **outpainting\_fisheye\_flux.json** | Manual version of the above: explicit Flux Inpainting + reprojection stages | inpainting_flux, RealESRGAN |
-| **outpainting\_fisheye.json**          | Same pipeline with a classic SD inpainting checkpoint instead of Flux | SD inpaint ckpt, RealESRGAN |
-| **Fisheye\_depth\_workflow\.json** | Reference graph: multi-view fisheye depth fusion done node-by-node (now built into `FisheyeDepthEstimator`) | — |
 | **fisheye\_to\_pointcloud.json** | Fisheye 180° → metric depth → point cloud (`.ply`/`.npy`) | — |
 | **PointCloud.json** | Single image → point cloud → cleaned novel-view render | Image-Filters (optional) |
 | **pointcloud\_walker.json** | Image → point cloud → camera fly-through WEBM | — |
 | **test\_pointcloud\_loading.json** | Reload a saved point cloud and orbit-render it | — |
+| **record\_trajectory.json** | Record a camera trajectory `.npy` for LoadTrajectory (two poses → SE(3) interpolation → SaveTrajectory) | — |
 | **pointcloud\_inpaint.json** | Enrich a cloud: Flux-inpaint disocclusions, lift them to 3D, merge, orbit render | inpainting_flux |
 | **PC\_enricher.json** | One-node version of the above: `PointcloudTrajectoryEnricher` along a saved trajectory | inpainting_flux |
 | **sbs180\_workflow.json** | Synthesize the second eye of a VR180 stereo pair from one fisheye view | inpainting_flux |
-| **video\_camera.json** | Re-shoot a video with a new camera move; WAN VACE regenerates disocclusions, Florence2 auto-captions | VHS, Florence2, KJNodes, Easy-Use, Image-Filters; WAN 2.1 VACE + Video-Depth-Anything models |
+| **video\_camera.json** | Re-shoot a video with a new camera move; WAN VACE regenerates disocclusions, Florence2 auto-captions | VHS, Florence2; WAN 2.1 VACE + Video-Depth-Anything models |
 | **wan\_vace\_ref\_to\_video.json** | Still fisheye image + recorded trajectory → WAN VACE camera-move video | WAN 2.1 VACE models; VHS (optional MP4 export) |
 | **video_to_4d_world\.json**            | Video → 4D world: VGGT poses/depth → motion masking → fused static splats + polish → tracked dynamic 4D Gaussians → novel-trajectory render. | — |
 | **video_to_4d_walkable_world\.json**   | Video → 4D WALKABLE world (test-friendly defaults): polished static splats enriched along a walk trajectory (`SplatTrajectoryEnricher`, Flux outpaint + SHARP) → 4D scene → walk-through render + `.ply`/`.npz` exports for free walking in external 3DGS viewers. | inpainting_flux |
+
+Superseded reference graphs live in `workflows/legacy/` (kept out of the template browser): **outpainting\_fisheye.json** (SD-inpaint-checkpoint variant of the flux outpaint) and **Fisheye\_depth\_workflow\.json** (the multi-view depth fusion that `FisheyeDepthEstimator` now performs internally).
 
 ---
 
@@ -254,9 +258,9 @@ Basic reprojection pipeline: apply masks, rotate pinhole camera, outpaint fishey
   <img src="demo_images/Pinhole_camera_rotation.png" alt="Pinhole Rotation" width="45%" />
 </div>
 
-### 2. `outpainting_fisheye.json`
+### 2. `legacy/outpainting_fisheye.json`
 
-Simplest text‐guided fisheye outpainting built with the core inpaint node.
+Simplest text‐guided fisheye outpainting built with the core inpaint node (superseded by the Flux variant).
 
 ### 3. `outpainting_fisheye_flux.json`
 
@@ -272,9 +276,9 @@ Flux Inpainting ensures sharper results and explicit reprojection stages.
 
 <img src="demo_images/Fisheye_outpainted_flux_dev.png" alt="Flux Dev" width="60%" />
 
-### 5. `Fisheye_depth_workflow.json`
+### 5. `legacy/Fisheye_depth_workflow.json`
 
-Convert fisheye images to metric depth and generate a PLY point cloud.
+Convert fisheye images to metric depth and generate a PLY point cloud — the manual multi-view graph that `FisheyeDepthEstimator` now performs in one node (see `fisheye_to_pointcloud.json`).
 
 <img src="demo_images/Depthmap.png" alt="Fisheye Depth→PointCloud" width="60%" />
 

@@ -122,7 +122,6 @@
           "name": "MASK",
           "type": "MASK",
           "links": [
-            106,
             107,
             115
           ]
@@ -164,7 +163,6 @@
           "name": "MAT_4X4",
           "type": "MAT_4X4",
           "links": [
-            159,
             173,
             174
           ]
@@ -297,7 +295,6 @@
           "type": "IMAGE",
           "links": [
             137,
-            164,
             176
           ]
         },
@@ -307,7 +304,6 @@
           "type": "MASK",
           "links": [
             136,
-            165,
             177
           ]
         }
@@ -451,7 +447,7 @@
           "name": "mask",
           "shape": 7,
           "type": "MASK",
-          "link": 159
+          "link": null
         },
         {
           "localized_name": "transform_matrix",
@@ -1069,7 +1065,6 @@
           "type": "IMAGE",
           "slot_index": 0,
           "links": [
-            90,
             96
           ]
         },
@@ -1087,7 +1082,7 @@
         "ver": "0.3.18"
       },
       "widgets_values": [
-        "flux_dev_example.png",
+        "camera_example_pinhole.jpg",
         "image",
         ""
       ]
@@ -1443,7 +1438,8 @@
         -779.3150675779287,
         -667.8637721813603
       ]
-    }
+    },
+    "camera_comfyui_rev": 1
   },
   "version": 0.4
 }
