@@ -18,6 +18,7 @@ with small synthetic data:
  8. align_depth_scale (world_nodes, contract C4) + DepthEdgeFilter
  9. FuseSplats             weighted voxel fusion
 10. SphereSplatSeed        pano -> splat sphere -> render round-trip
+11. Fisheye image-circle exclusion (motion mask / tracks / splat split)
 """
 
 import math
@@ -445,6 +446,63 @@ def test_10_sphere_splat_seed():
 # --------------------------------------------------------------------------- #
 # Runner
 # --------------------------------------------------------------------------- #
+def test_11_fisheye_circle_exclusion():
+    """Fisheye pixels/points outside the image circle (r > 1) must be ignored:
+    corners never become 'dynamic', corner tracks never lift to 3D, and points
+    at view angles beyond fov/2 are not matched against the mask."""
+    T, H, W = 6, 32, 32
+    fov = 180.0
+
+    # --- MotionMaskFromDepth: wildly flickering corners must stay static ----
+    depth = torch.full((T, H, W), 5.0)
+    depth[:, 14:18, 14:18] = torch.linspace(5.0, 2.0, T).view(T, 1, 1)  # real motion
+    u = torch.linspace(-1, 1, W).view(1, W).expand(H, W)
+    v = torch.linspace(-1, 1, H).view(H, 1).expand(H, W)
+    corners = (u * u + v * v) > 1.0 + 1e-6
+    for t in range(T):  # garbage depth flicker outside the circle
+        depth[t][corners] = 1.0 if t % 2 == 0 else 10.0
+    identity = torch.eye(4).unsqueeze(0).expand(T, 4, 4).contiguous()
+    (dyn,) = GS4D_nodes.MotionMaskFromDepth().motion_mask(
+        depth_seq=depth, trajectory=identity, input_projection="FISHEYE",
+        input_horizontal_fov=fov, threshold=0.10, frame_gap=2, dilate=0,
+        device="cpu",
+    )
+    assert dyn[:, corners].max().item() == 0.0, "fisheye corners were flagged dynamic"
+    assert dyn[:, 14:18, 14:18].max().item() == 1.0, "real in-circle motion missed"
+
+    # --- TracksToTrajectories: corner track must be dropped -----------------
+    tracks = torch.zeros(T, 2, 2)
+    tracks[:, 0, 0] = W / 2.0  # center track
+    tracks[:, 0, 1] = H / 2.0
+    tracks[:, 1, 0] = 0.0      # corner track (u=v=-1, r=1.414)
+    tracks[:, 1, 1] = 0.0
+    visibility = torch.ones(T, 2)
+    traj3d, track_ok = GS4D_nodes.TracksToTrajectories().tracks_to_trajectories(
+        tracks=tracks, visibility=visibility, depth_seq=depth,
+        input_projection="FISHEYE", input_horizontal_fov=fov,
+        min_visible_frac=0.5, device="cpu",
+    )
+    assert bool(track_ok[0]), "in-circle track unexpectedly invalid"
+    assert not bool(track_ok[1]), "out-of-circle corner track was lifted to 3D"
+
+    # --- SplitSplatsByMask: angle beyond fov/2 lands diagonally inside the
+    # [-1,1] square (r=1.33, u=v~0.94) but must not be matched to the mask ---
+    front = torch.tensor([[0.0, 0.0, 1.0]])
+    theta = math.radians(120.0)
+    behind_diag = torch.tensor([[
+        math.sin(theta) * math.cos(math.radians(45.0)),
+        math.sin(theta) * math.sin(math.radians(45.0)),
+        math.cos(theta),
+    ]])
+    splats = make_splats(torch.cat([front, behind_diag], dim=0))
+    inside, outside = GS4D_nodes.SplitSplatsByMask().split_splats(
+        splats=splats, mask=torch.ones(H, W), projection="FISHEYE",
+        horizontal_fov=fov, threshold=0.5, device="cpu",
+    )
+    assert inside.xyz.shape[0] == 1, "expected only the in-fov splat inside"
+    assert outside.xyz.shape[0] == 1, "beyond-fov splat must fall outside"
+
+
 TESTS = [
     test_01_interpolate_se3,
     test_02_render_gaussians_shapes_and_empty,
@@ -456,6 +514,7 @@ TESTS = [
     test_08_align_depth_scale_and_depth_edge_filter,
     test_09_fuse_splats,
     test_10_sphere_splat_seed,
+    test_11_fisheye_circle_exclusion,
 ]
 
 
