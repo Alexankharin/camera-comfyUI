@@ -209,6 +209,8 @@ Turn a monocular video into a navigable 4D (3D + time) Gaussian splat scene and 
 4. **Tracked dynamic 4D Gaussians** — `EstimateTracks` (CoTracker3) tracks a dense point grid across the video; `TracksToTrajectories` lifts the tracks to world-space 3D using depth + poses; `SplitSplatsByMask` separates dynamic splats from the static background; `BuildSplats4D` binds the dynamic canonical splats to track control points via kNN blending, producing a `GSPLAT4D` scene.
 5. **Render a novel trajectory** — build any new camera path (e.g. `CameraInterpolationNode`, `TrajectoryCompose` to retarget relative to a source pose) and render with `RenderSplats4DVideo` (or single frames with `RenderSplats4DFrame`). Save/reload scenes with `SaveSplats4D` / `LoadSplats4D`.
 
+**Static-camera fisheye variant** — for footage from a locked-off 180° fisheye camera, `workflows/fisheye_static_video_to_4d.json` skips pose estimation entirely (identity trajectory), uses the batched `FisheyeDepthEstimator` for per-frame radial depth and `FisheyeToGaussian` on frame 0 for the whole static world, then follows the same track → split → `BuildSplats4D` → render path (all 4D nodes accept the FISHEYE projection directly).
+
 ### Caveats
 
 * **Z-depth vs ray depth**: depth estimators (including `VideoPoseEstimator`) output Z-depth; point-cloud and splat lifting nodes expect ray depth. Insert `ZDepthToRayDepthNode` where needed, or geometry will bow at wide FOVs.
@@ -242,6 +244,7 @@ A set of JSON workflows illustrating typical use cases. Once the pack is install
 | **wan\_vace\_ref\_to\_video.json** | Still fisheye image + recorded trajectory → WAN VACE camera-move video | WAN 2.1 VACE models; VHS (optional MP4 export) |
 | **video_to_4d_world\.json**            | Video → 4D world: VGGT poses/depth → motion masking → fused static splats + polish → tracked dynamic 4D Gaussians → novel-trajectory render. | — |
 | **video_to_4d_walkable_world\.json**   | Video → 4D WALKABLE world (test-friendly defaults): polished static splats enriched along a walk trajectory (`SplatTrajectoryEnricher`, Flux outpaint + SHARP) → 4D scene → walk-through render + `.ply`/`.npz` exports for free walking in external 3DGS viewers. | inpainting_flux |
+| **fisheye\_static\_video\_to\_4d.json** | Static-camera 180° fisheye video → 4D Gaussian scene → novel-path render. No pose estimation needed: identity trajectory, batched fisheye depth, frame-0 splats split into static world + dynamic canonical. | VHS |
 
 Superseded reference graphs live in `workflows/legacy/` (kept out of the template browser): **outpainting\_fisheye.json** (SD-inpaint-checkpoint variant of the flux outpaint) and **Fisheye\_depth\_workflow\.json** (the multi-view depth fusion that `FisheyeDepthEstimator` now performs internally).
 
