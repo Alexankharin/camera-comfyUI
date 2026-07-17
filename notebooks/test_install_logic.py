@@ -42,7 +42,12 @@ def stub_commands(mod):
 def test_sharp_early_return():
     mod = load_install_module()
     calls = stub_commands(mod)
-    mod.ensure_sharp_checkout()  # real checkout has submodules/ml-sharpt/src/sharp
+    # Build the "already materialized" state explicitly — the repo's own
+    # submodule may not be checked out (e.g. CI clones without --recursive).
+    with tempfile.TemporaryDirectory() as tmp:
+        mod.NODE_DIR = os.path.join(tmp, "camera-comfyUI")
+        os.makedirs(os.path.join(mod.NODE_DIR, "submodules", "ml-sharpt", "src", "sharp"))
+        mod.ensure_sharp_checkout()
     assert calls == [], f"expected no commands, got {calls}"
     ok("sharp checkout present -> no git calls")
 
