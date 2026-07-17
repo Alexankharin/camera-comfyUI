@@ -527,7 +527,8 @@ def _extract_f_rest(data: Dict[str, np.ndarray]) -> Tuple[np.ndarray, int]:
 def _ensure_sharp_available() -> None:
     if not _SHARP_AVAILABLE:
         raise ModuleNotFoundError(
-            f"ml-sharpt is unavailable. Ensure submodules/ml-sharpt is present and its dependencies are installed. "
+            f"ml-sharpt is unavailable. Run this pack's install.py (ComfyUI-Manager does this "
+            f"automatically) to fetch submodules/ml-sharpt and its dependencies (incl. gsplat). "
             f"Import error: {_SHARP_IMPORT_ERROR}"
         )
 
@@ -1302,6 +1303,12 @@ def render_gaussians(
         u, v, depth = _xyz_to_equirect(X, Y, Z, camera_horizontal_fov)
 
     valid = (u >= -1.0) & (u <= 1.0) & (v >= -1.0) & (v <= 1.0)
+    if camera_projection == "PINHOLE":
+        # behind-camera points otherwise mirror-project into the frame
+        valid = valid & (Z > 1e-6)
+    elif camera_projection == "FISHEYE":
+        # keep the image circle only: angles beyond fov/2 land in the corners
+        valid = valid & ((u * u + v * v) <= 1.0 + 1e-6)
     if not valid.any():
         return _empty_render(output_width, output_height, dev)
 

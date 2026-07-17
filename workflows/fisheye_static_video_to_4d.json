@@ -1,0 +1,1295 @@
+{
+  "id": "00000000-0000-0000-0000-000000000000",
+  "revision": 0,
+  "last_node_id": 30,
+  "last_link_id": 26,
+  "nodes": [
+    {
+      "id": 30,
+      "type": "MarkdownNote",
+      "pos": [
+        -2000,
+        260
+      ],
+      "size": [
+        560,
+        700
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "properties": {
+        "Node name for S&R": "MarkdownNote"
+      },
+      "widgets_values": [
+        "# Static fisheye video → 4D Gaussian video\n\nTurns a video shot on a **static 180° fisheye camera** (locked-off shot,\nsecurity cam, tripod) into a 4D (3D + time) Gaussian scene, then re-renders it\nfrom a *moving* novel camera.\n\nA static camera needs **no pose estimation** (no VGGT, unlike\n`video_to_4d_world.json`): the trajectory is identity, and one frame already\nsees the entire static background.\n\n**Stages**\n1. **FisheyeDepthEstimator** — per-frame metric *radial* depth on the whole\n   fisheye batch (DISTANCE_AWARE multi-view merge).\n2. **MotionMaskFromDepth** (identity trajectory) — pixels whose depth changes\n   over time are dynamic.\n3. **FisheyeToGaussian** on frame 0 → whole-scene splats;\n   **SplitSplatsByMask** (FISHEYE 180°) separates the dynamic canonical\n   (inside) from the static world (outside).\n4. **EstimateTracks** (CoTracker3) + **TracksToTrajectories** (FISHEYE 180°,\n   identity poses — its default) lift 2D tracks to 3D control trajectories.\n5. **BuildSplats4D** binds the canonical splats to the tracks → 4D scene with\n   the static background attached.\n6. **RenderSplats4DVideo** renders a novel orbit (pinhole 90°). A second,\n   **muted** render replays the original static fisheye view for A/B\n   comparison — unmute it (Ctrl+M) to use.\n\n**Set:** the video path + `frame_load_cap` (≤ 64 recommended); the novel-path\nend pose; `threshold` in MotionMaskFromDepth (raise it if the mask flickers —\nper-frame depth is not temporally consistent).\n\n**Requires:** SHARP + gsplat (auto via install.py), CoTracker3 (torch.hub,\nfirst-use download), Depth-Anything V2 (auto), VideoHelperSuite pack.\n\n**Limitations:** the static world only knows what frame 0 saw — regions\noccluded by moving objects at t=0 are holes if the novel camera peeks behind\nthem; strong depth flicker can leak static pixels into the dynamic set.\n\n**Outputs:** novel-path WEBM, the 4D scene as `.npz` (SaveSplats4D — reload\nwith LoadSplats4D), optional replay WEBM."
+      ],
+      "title": "About this workflow",
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 1,
+      "type": "VHS_LoadVideoPath",
+      "pos": [
+        -1380,
+        300
+      ],
+      "size": [
+        240,
+        262
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "meta_batch",
+          "type": "VHS_BatchManager",
+          "link": null
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            1,
+            2,
+            3
+          ],
+          "slot_index": 0
+        },
+        {
+          "name": "frame_count",
+          "type": "INT",
+          "links": [],
+          "slot_index": 1
+        },
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "links": [],
+          "slot_index": 2
+        },
+        {
+          "name": "video_info",
+          "type": "VHS_VIDEOINFO",
+          "links": [],
+          "slot_index": 3
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "VHS_LoadVideoPath"
+      },
+      "widgets_values": {
+        "video": "input/fisheye_video.mp4",
+        "force_rate": 0,
+        "custom_width": 0,
+        "custom_height": 0,
+        "frame_load_cap": 49,
+        "skip_first_frames": 0,
+        "select_every_nth": 1,
+        "format": "AnimateDiff",
+        "videopreview": {
+          "hidden": false,
+          "paused": false,
+          "params": {
+            "filename": "input/fisheye_video.mp4",
+            "type": "path",
+            "format": "video/mp4",
+            "force_rate": 0,
+            "custom_width": 0,
+            "custom_height": 0,
+            "frame_load_cap": 49,
+            "skip_first_frames": 0,
+            "select_every_nth": 1
+          }
+        }
+      },
+      "title": "Load fisheye video (static camera, <= 64 frames)"
+    },
+    {
+      "id": 2,
+      "type": "FisheyeDepthEstimator",
+      "pos": [
+        -1060,
+        300
+      ],
+      "size": [
+        315,
+        246
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 1
+        }
+      ],
+      "outputs": [
+        {
+          "name": "depthmap",
+          "type": "TENSOR",
+          "links": [
+            4,
+            5
+          ],
+          "slot_index": 0
+        },
+        {
+          "name": "mask",
+          "type": "MASK",
+          "links": [],
+          "slot_index": 1
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "FisheyeDepthEstimator"
+      },
+      "widgets_values": [
+        "Depth-Anything-V2-Metric-Indoor-Base-hf",
+        1.0,
+        90.0,
+        518,
+        1024,
+        "DISTANCE_AWARE",
+        25,
+        1
+      ],
+      "title": "Per-frame radial depth (batched)"
+    },
+    {
+      "id": 3,
+      "type": "TransformToMatrix",
+      "pos": [
+        -1060,
+        640
+      ],
+      "size": [
+        315,
+        154
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "transformation matrix",
+          "type": "MAT_4X4",
+          "links": [
+            6,
+            7
+          ],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "TransformToMatrix"
+      },
+      "widgets_values": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "title": "Static camera (identity pose)"
+    },
+    {
+      "id": 4,
+      "type": "CameraInterpolationNode",
+      "pos": [
+        -680,
+        680
+      ],
+      "size": [
+        226,
+        78
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "initial_matrix",
+          "type": "MAT_4X4",
+          "link": 6
+        },
+        {
+          "name": "final_matrix",
+          "type": "MAT_4X4",
+          "link": 7
+        }
+      ],
+      "outputs": [
+        {
+          "name": "trajectory",
+          "type": "TENSOR",
+          "links": [
+            8,
+            9
+          ],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "CameraInterpolationNode"
+      },
+      "widgets_values": [
+        2
+      ],
+      "title": "Identity trajectory (interpolated to T)"
+    },
+    {
+      "id": 5,
+      "type": "MotionMaskFromDepth",
+      "pos": [
+        -680,
+        300
+      ],
+      "size": [
+        315,
+        202
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "depth_seq",
+          "type": "TENSOR",
+          "link": 4
+        },
+        {
+          "name": "trajectory",
+          "type": "TENSOR",
+          "link": 8
+        }
+      ],
+      "outputs": [
+        {
+          "name": "motion_mask",
+          "type": "MASK",
+          "links": [
+            10
+          ],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "MotionMaskFromDepth"
+      },
+      "widgets_values": [
+        "FISHEYE",
+        180.0,
+        0.15,
+        4,
+        2,
+        "auto"
+      ],
+      "title": "Dynamic-pixel mask (1 = moving)"
+    },
+    {
+      "id": 6,
+      "type": "ImageFromBatch",
+      "pos": [
+        -680,
+        560
+      ],
+      "size": [
+        226,
+        82
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 2
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            11
+          ],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "ImageFromBatch"
+      },
+      "widgets_values": [
+        0,
+        1
+      ],
+      "title": "Frame 0 (canonical view)"
+    },
+    {
+      "id": 7,
+      "type": "FisheyeToGaussian",
+      "pos": [
+        -300,
+        460
+      ],
+      "size": [
+        330,
+        290
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 11
+        }
+      ],
+      "outputs": [
+        {
+          "name": "splats",
+          "type": "GSPLAT",
+          "links": [
+            12
+          ],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "FisheyeToGaussian"
+      },
+      "widgets_values": [
+        180.0,
+        0,
+        0,
+        "<download default>",
+        "auto",
+        90.0,
+        0,
+        "smart",
+        0.01,
+        5.0
+      ],
+      "title": "SHARP frame 0 -> whole-scene splats"
+    },
+    {
+      "id": 8,
+      "type": "EstimateTracks",
+      "pos": [
+        -300,
+        820
+      ],
+      "size": [
+        300,
+        102
+      ],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "frames",
+          "type": "IMAGE",
+          "link": 3
+        }
+      ],
+      "outputs": [
+        {
+          "name": "tracks",
+          "type": "TENSOR",
+          "links": [
+            13
+          ],
+          "slot_index": 0
+        },
+        {
+          "name": "visibility",
+          "type": "TENSOR",
+          "links": [
+            14
+          ],
+          "slot_index": 1
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "EstimateTracks"
+      },
+      "widgets_values": [
+        20,
+        "auto"
+      ],
+      "title": "CoTracker3 (downloads on first use)"
+    },
+    {
+      "id": 9,
+      "type": "SplitSplatsByMask",
+      "pos": [
+        100,
+        300
+      ],
+      "size": [
+        315,
+        174
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "splats",
+          "type": "GSPLAT",
+          "link": 12
+        },
+        {
+          "name": "mask",
+          "type": "MASK",
+          "link": 10
+        },
+        {
+          "name": "camera_matrix",
+          "type": "MAT_4X4",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "inside_splats",
+          "type": "GSPLAT",
+          "links": [
+            15
+          ],
+          "slot_index": 0
+        },
+        {
+          "name": "outside_splats",
+          "type": "GSPLAT",
+          "links": [
+            16
+          ],
+          "slot_index": 1
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "SplitSplatsByMask"
+      },
+      "widgets_values": [
+        "FISHEYE",
+        180.0,
+        0.5,
+        "auto"
+      ],
+      "title": "Split: inside = dynamic, outside = static world"
+    },
+    {
+      "id": 10,
+      "type": "TracksToTrajectories",
+      "pos": [
+        100,
+        700
+      ],
+      "size": [
+        315,
+        190
+      ],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "tracks",
+          "type": "TENSOR",
+          "link": 13
+        },
+        {
+          "name": "visibility",
+          "type": "TENSOR",
+          "link": 14
+        },
+        {
+          "name": "depth_seq",
+          "type": "TENSOR",
+          "link": 5
+        },
+        {
+          "name": "trajectory",
+          "type": "TENSOR",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "trajectories3d",
+          "type": "TENSOR",
+          "links": [
+            17
+          ],
+          "slot_index": 0
+        },
+        {
+          "name": "track_valid",
+          "type": "TENSOR",
+          "links": [
+            18
+          ],
+          "slot_index": 1
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "TracksToTrajectories"
+      },
+      "widgets_values": [
+        "FISHEYE",
+        180.0,
+        0.5,
+        "auto"
+      ],
+      "title": "Lift tracks to 3D (identity poses = default)"
+    },
+    {
+      "id": 11,
+      "type": "BuildSplats4D",
+      "pos": [
+        500,
+        440
+      ],
+      "size": [
+        315,
+        190
+      ],
+      "flags": {},
+      "order": 11,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "canonical",
+          "type": "GSPLAT",
+          "link": 15
+        },
+        {
+          "name": "trajectories3d",
+          "type": "TENSOR",
+          "link": 17
+        },
+        {
+          "name": "static",
+          "type": "GSPLAT",
+          "link": 16
+        },
+        {
+          "name": "times",
+          "type": "TENSOR",
+          "link": null
+        },
+        {
+          "name": "track_valid",
+          "type": "TENSOR",
+          "link": 18
+        }
+      ],
+      "outputs": [
+        {
+          "name": "splats4d",
+          "type": "GSPLAT4D",
+          "links": [
+            19,
+            20,
+            21
+          ],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "BuildSplats4D"
+      },
+      "widgets_values": [
+        0,
+        4,
+        0.0,
+        "auto"
+      ],
+      "title": "Bind canonical to tracks -> 4D scene"
+    },
+    {
+      "id": 12,
+      "type": "TransformToMatrix",
+      "pos": [
+        500,
+        720
+      ],
+      "size": [
+        315,
+        154
+      ],
+      "flags": {},
+      "order": 12,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "transformation matrix",
+          "type": "MAT_4X4",
+          "links": [
+            22
+          ],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "TransformToMatrix"
+      },
+      "widgets_values": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "title": "Novel path: start (original camera)"
+    },
+    {
+      "id": 13,
+      "type": "TransformToMatrix",
+      "pos": [
+        500,
+        920
+      ],
+      "size": [
+        315,
+        154
+      ],
+      "flags": {},
+      "order": 13,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "transformation matrix",
+          "type": "MAT_4X4",
+          "links": [
+            23
+          ],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "TransformToMatrix"
+      },
+      "widgets_values": [
+        0.15,
+        0.0,
+        0.1,
+        0.0,
+        -10.0
+      ],
+      "title": "Novel path: end (small orbit — edit me)"
+    },
+    {
+      "id": 14,
+      "type": "CameraInterpolationNode",
+      "pos": [
+        880,
+        820
+      ],
+      "size": [
+        226,
+        78
+      ],
+      "flags": {},
+      "order": 14,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "initial_matrix",
+          "type": "MAT_4X4",
+          "link": 22
+        },
+        {
+          "name": "final_matrix",
+          "type": "MAT_4X4",
+          "link": 23
+        }
+      ],
+      "outputs": [
+        {
+          "name": "trajectory",
+          "type": "TENSOR",
+          "links": [
+            24
+          ],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "CameraInterpolationNode"
+      },
+      "widgets_values": [
+        2
+      ],
+      "title": "Novel camera path"
+    },
+    {
+      "id": 15,
+      "type": "RenderSplats4DVideo",
+      "pos": [
+        900,
+        300
+      ],
+      "size": [
+        315,
+        266
+      ],
+      "flags": {},
+      "order": 15,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "splats4d",
+          "type": "GSPLAT4D",
+          "link": 19
+        },
+        {
+          "name": "trajectory",
+          "type": "TENSOR",
+          "link": 24
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": [
+            25
+          ],
+          "slot_index": 0
+        },
+        {
+          "name": "masks",
+          "type": "MASK",
+          "links": [],
+          "slot_index": 1
+        },
+        {
+          "name": "disparity",
+          "type": "TENSOR",
+          "links": [],
+          "slot_index": 2
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "RenderSplats4DVideo"
+      },
+      "widgets_values": [
+        49,
+        0.0,
+        1.0,
+        "PINHOLE",
+        90.0,
+        768,
+        768,
+        "auto",
+        0,
+        "auto"
+      ],
+      "title": "Render 4D along novel path (pinhole 90°)"
+    },
+    {
+      "id": 16,
+      "type": "RenderSplats4DVideo",
+      "pos": [
+        900,
+        1060
+      ],
+      "size": [
+        315,
+        266
+      ],
+      "flags": {},
+      "order": 16,
+      "mode": 2,
+      "inputs": [
+        {
+          "name": "splats4d",
+          "type": "GSPLAT4D",
+          "link": 20
+        },
+        {
+          "name": "trajectory",
+          "type": "TENSOR",
+          "link": 9
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": [
+            26
+          ],
+          "slot_index": 0
+        },
+        {
+          "name": "masks",
+          "type": "MASK",
+          "links": [],
+          "slot_index": 1
+        },
+        {
+          "name": "disparity",
+          "type": "TENSOR",
+          "links": [],
+          "slot_index": 2
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "RenderSplats4DVideo"
+      },
+      "widgets_values": [
+        49,
+        0.0,
+        1.0,
+        "FISHEYE",
+        180.0,
+        1024,
+        1024,
+        "auto",
+        0,
+        "auto"
+      ],
+      "title": "MUTED: replay original fisheye view (A/B check)"
+    },
+    {
+      "id": 17,
+      "type": "SaveWEBM",
+      "pos": [
+        1300,
+        300
+      ],
+      "size": [
+        315,
+        437
+      ],
+      "flags": {},
+      "order": 17,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 25
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "Node name for S&R": "SaveWEBM"
+      },
+      "widgets_values": [
+        "4d_fisheye_novel",
+        "vp9",
+        24,
+        32
+      ]
+    },
+    {
+      "id": 18,
+      "type": "SaveSplats4D",
+      "pos": [
+        1300,
+        800
+      ],
+      "size": [
+        315,
+        106
+      ],
+      "flags": {},
+      "order": 18,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "splats4d",
+          "type": "GSPLAT4D",
+          "link": 21
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "Node name for S&R": "SaveSplats4D"
+      },
+      "widgets_values": [
+        "ComfyUISplat4D_fisheye",
+        false
+      ],
+      "title": "Save 4D scene (.npz)"
+    },
+    {
+      "id": 19,
+      "type": "SaveWEBM",
+      "pos": [
+        1300,
+        1060
+      ],
+      "size": [
+        315,
+        437
+      ],
+      "flags": {},
+      "order": 19,
+      "mode": 2,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 26
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "Node name for S&R": "SaveWEBM"
+      },
+      "widgets_values": [
+        "4d_fisheye_replay",
+        "vp9",
+        24,
+        32
+      ],
+      "title": "MUTED: replay output"
+    }
+  ],
+  "links": [
+    [
+      1,
+      1,
+      0,
+      2,
+      0,
+      "IMAGE"
+    ],
+    [
+      2,
+      1,
+      0,
+      6,
+      0,
+      "IMAGE"
+    ],
+    [
+      3,
+      1,
+      0,
+      8,
+      0,
+      "IMAGE"
+    ],
+    [
+      4,
+      2,
+      0,
+      5,
+      0,
+      "TENSOR"
+    ],
+    [
+      5,
+      2,
+      0,
+      10,
+      2,
+      "TENSOR"
+    ],
+    [
+      6,
+      3,
+      0,
+      4,
+      0,
+      "MAT_4X4"
+    ],
+    [
+      7,
+      3,
+      0,
+      4,
+      1,
+      "MAT_4X4"
+    ],
+    [
+      8,
+      4,
+      0,
+      5,
+      1,
+      "TENSOR"
+    ],
+    [
+      9,
+      4,
+      0,
+      16,
+      1,
+      "TENSOR"
+    ],
+    [
+      10,
+      5,
+      0,
+      9,
+      1,
+      "MASK"
+    ],
+    [
+      11,
+      6,
+      0,
+      7,
+      0,
+      "IMAGE"
+    ],
+    [
+      12,
+      7,
+      0,
+      9,
+      0,
+      "GSPLAT"
+    ],
+    [
+      13,
+      8,
+      0,
+      10,
+      0,
+      "TENSOR"
+    ],
+    [
+      14,
+      8,
+      1,
+      10,
+      1,
+      "TENSOR"
+    ],
+    [
+      15,
+      9,
+      0,
+      11,
+      0,
+      "GSPLAT"
+    ],
+    [
+      16,
+      9,
+      1,
+      11,
+      2,
+      "GSPLAT"
+    ],
+    [
+      17,
+      10,
+      0,
+      11,
+      1,
+      "TENSOR"
+    ],
+    [
+      18,
+      10,
+      1,
+      11,
+      4,
+      "TENSOR"
+    ],
+    [
+      19,
+      11,
+      0,
+      15,
+      0,
+      "GSPLAT4D"
+    ],
+    [
+      20,
+      11,
+      0,
+      16,
+      0,
+      "GSPLAT4D"
+    ],
+    [
+      21,
+      11,
+      0,
+      18,
+      0,
+      "GSPLAT4D"
+    ],
+    [
+      22,
+      12,
+      0,
+      14,
+      0,
+      "MAT_4X4"
+    ],
+    [
+      23,
+      13,
+      0,
+      14,
+      1,
+      "MAT_4X4"
+    ],
+    [
+      24,
+      14,
+      0,
+      15,
+      1,
+      "TENSOR"
+    ],
+    [
+      25,
+      15,
+      0,
+      17,
+      0,
+      "IMAGE"
+    ],
+    [
+      26,
+      16,
+      0,
+      19,
+      0,
+      "IMAGE"
+    ]
+  ],
+  "groups": [
+    {
+      "id": 1,
+      "title": "1. Load fisheye video",
+      "bounding": [
+        -1400,
+        240,
+        280,
+        342
+      ],
+      "color": "#3f789e",
+      "font_size": 24,
+      "flags": {}
+    },
+    {
+      "id": 2,
+      "title": "2. Per-frame fisheye depth",
+      "bounding": [
+        -1080,
+        240,
+        355,
+        326
+      ],
+      "color": "#a1309b",
+      "font_size": 24,
+      "flags": {}
+    },
+    {
+      "id": 3,
+      "title": "3. Static camera trajectory",
+      "bounding": [
+        -1080,
+        580,
+        646,
+        234
+      ],
+      "color": "#8A8",
+      "font_size": 24,
+      "flags": {}
+    },
+    {
+      "id": 4,
+      "title": "4. Motion mask",
+      "bounding": [
+        -700,
+        240,
+        355,
+        282
+      ],
+      "color": "#b58b2a",
+      "font_size": 24,
+      "flags": {}
+    },
+    {
+      "id": 5,
+      "title": "5. Frame-0 splats & static/dynamic split",
+      "bounding": [
+        -700,
+        240,
+        1135,
+        530
+      ],
+      "color": "#88A",
+      "font_size": 24,
+      "flags": {}
+    },
+    {
+      "id": 6,
+      "title": "6. Dynamic tracks -> 3D",
+      "bounding": [
+        -320,
+        640,
+        755,
+        302
+      ],
+      "color": "#b06634",
+      "font_size": 24,
+      "flags": {}
+    },
+    {
+      "id": 7,
+      "title": "7. 4D scene",
+      "bounding": [
+        480,
+        380,
+        1155,
+        546
+      ],
+      "color": "#535",
+      "font_size": 24,
+      "flags": {}
+    },
+    {
+      "id": 8,
+      "title": "8. Render novel path (+ muted replay)",
+      "bounding": [
+        480,
+        240,
+        1155,
+        1277
+      ],
+      "color": "#3f789e",
+      "font_size": 24,
+      "flags": {}
+    }
+  ],
+  "config": {},
+  "extra": {
+    "camera_comfyui_rev": 1
+  },
+  "version": 0.4
+}

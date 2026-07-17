@@ -1,7 +1,7 @@
 {
   "id": "4e89c8a4-594b-4d15-a089-da088966adee",
   "revision": 0,
-  "last_node_id": 44,
+  "last_node_id": 45,
   "last_link_id": 87,
   "nodes": [
     {
@@ -687,7 +687,8 @@
         0,
         0,
         0
-      ]
+      ],
+      "title": "Eye baseline (shiftX 0.1)"
     },
     {
       "id": 31,
@@ -871,7 +872,8 @@
       "properties": {},
       "widgets_values": [
         "shifted_camera_equirect"
-      ]
+      ],
+      "title": "Right eye (equirect)"
     },
     {
       "id": 27,
@@ -908,7 +910,7 @@
         "Node name for S&R": "LoadImage"
       },
       "widgets_values": [
-        "Fisheye_outpainted_flux_dev.png",
+        "camera_example_fisheye.jpg",
         "image"
       ]
     },
@@ -998,7 +1000,32 @@
       "properties": {},
       "widgets_values": [
         "init_camera_equirect"
-      ]
+      ],
+      "title": "Left eye (equirect)"
+    },
+    {
+      "id": 45,
+      "type": "MarkdownNote",
+      "title": "About this workflow",
+      "pos": [
+        929.3206787109375,
+        1152.5965576171875
+      ],
+      "size": [
+        520,
+        262
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "properties": {},
+      "widgets_values": [
+        "# SBS VR180: synthesize the second eye\n\nFrom one 180° fisheye view, synthesizes a stereo pair: fisheye metric depth → point cloud → clean → shift the camera by the eye baseline (TransformToMatrix shiftX = 0.1) → re-project to fisheye → four chained OutpaintAnyProjection passes fill the disocclusions → both eyes are exported as 180° equirectangular images.\n\n- **Set:** fisheye input (e.g. from `Outpaint_fisheye180.json`); the baseline (0.1 ≈ 6.5 cm when depth is metric); prompts optional.\n- **Requires:** inpainting_flux (auto-installed), Depth-Anything V2.\n- **Output:** `init_camera_equirect` + `shifted_camera_equirect` — combine side-by-side for a VR180 player."
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
     }
   ],
   "links": [
@@ -1230,7 +1257,7 @@
   "groups": [
     {
       "id": 1,
-      "title": "Metric depth estimation",
+      "title": "1. Fisheye metric depth",
       "bounding": [
         1474.8399658203125,
         1625.7159423828125,
@@ -1243,7 +1270,7 @@
     },
     {
       "id": 2,
-      "title": "Pointcloud manipulation",
+      "title": "2. Point cloud & eye-baseline shift",
       "bounding": [
         2231.516845703125,
         1746.5635986328125,
@@ -1256,7 +1283,7 @@
     },
     {
       "id": 4,
-      "title": "Outpaint and project to equirect",
+      "title": "3. Outpaint disocclusions & export equirect",
       "bounding": [
         3721.45654296875,
         1723.2581787109375,
@@ -1269,7 +1296,7 @@
     },
     {
       "id": 5,
-      "title": "Visualisations",
+      "title": "Previews",
       "bounding": [
         2852.595703125,
         1071.784912109375,
@@ -1290,7 +1317,8 @@
         -1811.182955009025
       ]
     },
-    "frontendVersion": "1.20.4"
+    "frontendVersion": "1.20.4",
+    "camera_comfyui_rev": 1
   },
   "version": 0.4
 }

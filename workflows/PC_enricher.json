@@ -1,7 +1,7 @@
 {
   "id": "312a3a27-6189-4cd7-8c9f-5a62881c623e",
   "revision": 0,
-  "last_node_id": 18,
+  "last_node_id": 19,
   "last_link_id": 37,
   "nodes": [
     {
@@ -38,7 +38,7 @@
         "Node name for S&R": "LoadImage"
       },
       "widgets_values": [
-        "Fisheye_outpainted_flux_dev.png",
+        "camera_example_fisheye.jpg",
         "image"
       ]
     },
@@ -213,7 +213,9 @@
         90,
         1024,
         4096,
-        21
+        "SOFTMERGE",
+        21,
+        1
       ]
     },
     {
@@ -326,14 +328,11 @@
         10,
         7.5,
         5,
-        "PINHOLE",
-        90,
-        1024,
-        1024,
-        "open",
-        9,
-        15
-      ]
+        0.07,
+        3,
+        "Depth-Anything-V2-Metric-Indoor-Base-hf"
+      ],
+      "title": "Enrich cloud along trajectory (Flux outpaint)"
     },
     {
       "id": 18,
@@ -411,8 +410,36 @@
         90,
         1024,
         1024,
-        2
-      ]
+        2,
+        0,
+        false,
+        false
+      ],
+      "title": "Orbit preview of enriched cloud"
+    },
+    {
+      "id": 19,
+      "type": "MarkdownNote",
+      "title": "About this workflow",
+      "pos": [
+        982.239013671875,
+        1182.49755859375
+      ],
+      "size": [
+        520,
+        314
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "properties": {},
+      "widgets_values": [
+        "# Point cloud enricher (outpaint along a trajectory)\n\nFisheye image → metric depth → point cloud, then **PointcloudTrajectoryEnricher** walks the loaded camera trajectory: at each pose it renders the cloud, Flux-inpaints the disocclusion holes, re-estimates depth, aligns it and merges the new points into the cloud. The enriched cloud is saved and previewed as an orbit video.\n\nThis is the one-node version of `pointcloud_inpaint.json`.\n\n- **Set:** input image; trajectory .npy (record one with SaveTrajectory); prompt inside the enricher.\n- **Requires:** inpainting_flux (auto-installed), Depth-Anything V2, FLUX.1-Fill NF4 weights.\n- **Note:** 2026-07 schema migration — the enricher's render/reproject options are now internal; voxel merge params were reset to defaults."
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
     }
   ],
   "links": [
@@ -513,7 +540,47 @@
       "TENSOR"
     ]
   ],
-  "groups": [],
+  "groups": [
+    {
+      "id": 1,
+      "title": "1. Fisheye → point cloud",
+      "bounding": [
+        1522.239013671875,
+        1122.49755859375,
+        1332.4192962646484,
+        589.1494140625
+      ],
+      "color": "#3f789e",
+      "font_size": 24,
+      "flags": {}
+    },
+    {
+      "id": 2,
+      "title": "2. Enrich along trajectory",
+      "bounding": [
+        1964.2667236328125,
+        1479.796630859375,
+        1073.373291015625,
+        614.0
+      ],
+      "color": "#a1309b",
+      "font_size": 24,
+      "flags": {}
+    },
+    {
+      "id": 3,
+      "title": "3. Save & preview",
+      "bounding": [
+        2283.51123046875,
+        1545.8380126953125,
+        1130.08935546875,
+        726.26318359375
+      ],
+      "color": "#8A8",
+      "font_size": 24,
+      "flags": {}
+    }
+  ],
   "config": {},
   "extra": {
     "ds": {
@@ -523,7 +590,8 @@
         -1433.3959538925521
       ]
     },
-    "frontendVersion": "1.19.9"
+    "frontendVersion": "1.19.9",
+    "camera_comfyui_rev": 1
   },
   "version": 0.4
 }

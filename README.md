@@ -38,7 +38,17 @@ A collection of ComfyUI custom nodes to handle diverse camera projections (pinho
 
 ### Option A — ComfyUI Manager (recommended)
 
-The node pack is published to the [ComfyUI Registry](https://registry.comfy.org) as **`camera-comfyui`** (publisher `alexk`). In ComfyUI, open **Manager → Custom Nodes Manager**, search for **camera-comfyUI**, and click **Install**, then restart ComfyUI. The registry package bundles the SHARP submodule and installs the base Python requirements automatically; optional CUDA-specific extras (`gsplat`, `vggt`) still follow the manual steps below.
+The node pack is published to the [ComfyUI Registry](https://registry.comfy.org) as **`camera-comfyui`** (publisher `alexk`). In ComfyUI, open **Manager → Custom Nodes Manager**, search for **camera-comfyUI**, and click **Install**, then restart ComfyUI.
+
+Installation is fully automatic: ComfyUI-Manager installs `requirements.txt` and then runs this pack's `install.py`, which sets up everything the optional nodes need — no manual steps:
+
+* **vggt** (`VideoPoseEstimator`) — pip-installed from GitHub over https (it is not on PyPI).
+* **SHARP** (`ImageToSplat`, `VideoToFusedSplats`, …) — the `submodules/ml-sharpt` checkout is bundled in the registry package (and fetched via `git submodule`/clone for git installs), and its Python deps come from `requirements.txt`.
+* **gsplat** — pip-installed; its CUDA kernels JIT-compile on first use.
+* **ComfyUI-Flux-Inpainting** (`OutpaintAnyProjection`, `SplatTrajectoryEnricher`) — cloned automatically into `custom_nodes/inpainting_flux` (skipped if you already have the pack under any of its usual folder names).
+* **Example inputs** — the sample image/trajectory files referenced by the bundled workflows are copied into ComfyUI's `input/` folder, so the templates run immediately.
+
+Each step is optional and non-fatal: if one fails (e.g. no network), only the nodes that need it stay disabled — re-run `python install.py` inside the pack folder to retry.
 
 > **Maintainers:** releases are automated — bumping `version` in `pyproject.toml` on `main` triggers `.github/workflows/publish_action.yml`, which publishes the new version to the registry (requires the `REGISTRY_ACCESS_TOKEN` repo secret).
 
@@ -56,35 +66,29 @@ The node pack is published to the [ComfyUI Registry](https://registry.comfy.org)
    sudo apt-get update && sudo apt-get install build-essential ffmpeg libsm6 libxext6 -y
    ```
 
-3. **Python Requirements**:
+3. **Python Requirements + optional dependencies** — one command sets up everything (base requirements, vggt, the SHARP submodule, gsplat, and the `inpainting_flux` sibling pack):
 
    ```bash
-   pip install -r custom_nodes/camera-comfyUI/requirements.txt
+   cd custom_nodes/camera-comfyUI && python install.py
    ```
 
-   * *Optional:* `open3d` for GUI point cloud tools.
+   This is the same script ComfyUI-Manager runs automatically; it is idempotent, and every optional step is non-fatal.
 
-   **Optional dependencies** (only needed for specific nodes):
+   **What it covers** (for reference — no manual action needed):
 
-   * **gsplat** — CUDA-accelerated Gaussian splat rasterizer. Required by `SplatPolish` and used as the fast render backend for `RenderSplat` / `RenderSplats4D*`. Needs a CUDA GPU and a matching PyTorch build: `pip install gsplat`.
-   * **vggt** — camera pose + depth estimation (`VideoPoseEstimator`). Install with `pip install vggt` (or `pip install git+https://github.com/facebookresearch/vggt.git`), or clone [facebookresearch/vggt](https://github.com/facebookresearch/vggt) as a sibling folder in your ComfyUI root. The `facebook/VGGT-1B` weights (~5 GB) download via `huggingface_hub` on first use.
-   * **CoTracker3** — point tracking for `EstimateTracks`. No manual install: it is fetched automatically via `torch.hub` on first use.
-   * **SHARP** — image→splat prediction (`ImageToSplat`, `FisheyeToGaussian`, `VideoToFusedSplats`, `SplatTrajectoryEnricher`). Ships as the existing git submodule at `submodules/ml-sharpt` ([apple/ml-sharp](https://github.com/apple/ml-sharp)) — run `git submodule update --init` after cloning.
+   * **gsplat** — CUDA-accelerated Gaussian splat rasterizer. Required by `SplatPolish`, SHARP, and the fast render backend for `RenderSplat` / `RenderSplats4D*`. Kernels JIT-compile on first use (needs a CUDA GPU + matching PyTorch build).
+   * **vggt** — camera pose + depth estimation (`VideoPoseEstimator`). Not on PyPI — installed with `pip install git+https://github.com/facebookresearch/vggt.git`. A sibling clone of [facebookresearch/vggt](https://github.com/facebookresearch/vggt) in your ComfyUI root also works. The `facebook/VGGT-1B` weights (~5 GB) download via `huggingface_hub` on first use.
+   * **CoTracker3** — point tracking for `EstimateTracks`. Fetched automatically via `torch.hub` on first use.
+   * **SHARP** — image→splat prediction (`ImageToSplat`, `FisheyeToGaussian`, `VideoToFusedSplats`, `SplatTrajectoryEnricher`). Lives as the git submodule at `submodules/ml-sharpt` ([apple/ml-sharp](https://github.com/apple/ml-sharp)); `install.py` initializes it for you.
+   * **ComfyUI-Flux-Inpainting** — cloned into `custom_nodes/inpainting_flux` if missing. Any of the usual folder names (`inpainting_flux`, `ComfyUI-Flux-Inpainting`, `ComfyUI-Flux-Inpainting-main`) is detected — no renaming needed.
 
-4. **Additional Nodes** (for certain workflows):
+4. **Additional Nodes** (only for some example workflows):
 
-   * Clone the following repositories directly into your `custom_nodes` folder:
-     * [ComfyUI-Flux-Inpainting](https://github.com/rubi-du/ComfyUI-Flux-Inpainting)
-     * [ComfyUI-Image-Filters](https://github.com/spacepxl/ComfyUI-Image-Filters)
-   * **Important:** If the `ComfyUI-Flux-Inpainting` repository is cloned as `ComfyUI-Flux-Inpainting-main`, rename the folder to `inpainting_flux`:
-     ```bash
-     mv custom_nodes/ComfyUI-Flux-Inpainting-main custom_nodes/inpainting_flux
-     ```
+   * [ComfyUI-Image-Filters](https://github.com/spacepxl/ComfyUI-Image-Filters) — install via Manager or clone into `custom_nodes`.
 
-5. **Flux Models** (Hugging Face):
+5. **Flux Models** (Hugging Face, only for gated models):
 
    ```bash
-   pip install huggingface_hub
    huggingface-cli login
    ```
 
@@ -205,6 +209,8 @@ Turn a monocular video into a navigable 4D (3D + time) Gaussian splat scene and 
 4. **Tracked dynamic 4D Gaussians** — `EstimateTracks` (CoTracker3) tracks a dense point grid across the video; `TracksToTrajectories` lifts the tracks to world-space 3D using depth + poses; `SplitSplatsByMask` separates dynamic splats from the static background; `BuildSplats4D` binds the dynamic canonical splats to track control points via kNN blending, producing a `GSPLAT4D` scene.
 5. **Render a novel trajectory** — build any new camera path (e.g. `CameraInterpolationNode`, `TrajectoryCompose` to retarget relative to a source pose) and render with `RenderSplats4DVideo` (or single frames with `RenderSplats4DFrame`). Save/reload scenes with `SaveSplats4D` / `LoadSplats4D`.
 
+**Static-camera fisheye variant** — for footage from a locked-off 180° fisheye camera, `workflows/fisheye_static_video_to_4d.json` skips pose estimation entirely (identity trajectory), uses the batched `FisheyeDepthEstimator` for per-frame radial depth and `FisheyeToGaussian` on frame 0 for the whole static world, then follows the same track → split → `BuildSplats4D` → render path (all 4D nodes accept the FISHEYE projection directly).
+
 ### Caveats
 
 * **Z-depth vs ray depth**: depth estimators (including `VideoPoseEstimator`) output Z-depth; point-cloud and splat lifting nodes expect ray depth. Insert `ZDepthToRayDepthNode` where needed, or geometry will bow at wide FOVs.
@@ -216,23 +222,31 @@ Turn a monocular video into a navigable 4D (3D + time) Gaussian splat scene and 
 
 ## Workflows
 
-A set of JSON workflows illustrating typical use cases. Each workflow lives in `workflows/` and can be loaded directly in ComfyUI.
+A set of JSON workflows illustrating typical use cases. Once the pack is installed they appear in ComfyUI under **Workflow → Browse Templates** (with thumbnails); the files live in `workflows/` and can also be loaded directly. Each workflow contains an embedded **“About this workflow”** note in the canvas explaining its stages, what to set, and what it needs — and references the bundled example inputs that `install.py` copies into your ComfyUI `input/` folder, so they run as-is on a fresh install.
 
-| Workflow                               | Description                                                    |
-| -------------------------------------- | -------------------------------------------------------------- |
-| **demo\_camera\_workflow\.json**       | Masked reprojection demo: pinhole → fisheye/equirect           |
-| **outpainting\_fisheye.json**          | Text‐guided fisheye outpainting (built‐in inpaint node)        |
-| **outpainting\_fisheye\_flux.json**    | Flux‐based outpainting with clear reprojection scheme          |
-| **Outpaint\_node\_test.json**          | Test harness for the universal outpaint node                   |
-| **Outpaint\_fisheye180.json**          | 180° fisheye outpainting via `OutpaintAnyProjection`           |
-| **Fisheye\_depth\_workflow\.json**     | Fisheye → metric depth → point cloud → PLY export              |
-| **Pointcloud.json**                    | Metric‐depth‐anything v2 → point cloud → camera view synthesis |
-| **pointcloud\_inpaint.json**           | Inpaint + backproject to 3D for dynamic camera motion videos   |
-| **Pointcloud\_walker.json**            | GUI‐based camera control via Open3D                            |
-| **sbs180\_workflow.json**              | Generate stereo (side-by-side) wide-angle/fisheye/equirectangular stereo pairs from a high-res input |
-| **video_camera.json**                  | Camera trajectory movement workflow using `wan-vace` for video inpainting. |
-| **video_to_4d_world\.json**            | Video → 4D world: VGGT poses/depth → motion masking → fused static splats + polish → tracked dynamic 4D Gaussians → novel-trajectory render. |
-| **video_to_4d_walkable_world\.json**   | Video → 4D WALKABLE world (test-friendly defaults): polished static splats enriched along a walk trajectory (`SplatTrajectoryEnricher`, Flux outpaint + SHARP) → 4D scene → walk-through render + `.ply`/`.npz` exports for free walking in external 3DGS viewers. |
+*Extras* below means dependencies beyond this pack and Depth-Anything V2 (which auto-downloads); `inpainting_flux` is installed automatically by `install.py`.
+
+| Workflow | Description | Extras |
+| --- | --- | --- |
+| **demo\_camera\_workflow\.json** | Minimal demo: rotate the camera and reproject pinhole → equirectangular, with coverage mask | — |
+| **Outpaint\_node\_test.json** | One-patch smoke test of `OutpaintAnyProjection` | inpainting_flux |
+| **Outpaint\_fisheye180.json** | Pinhole 90° → full 180° fisheye via five chained `OutpaintAnyProjection` passes + composite/upscale | inpainting_flux |
+| **outpainting\_fisheye\_flux.json** | Manual version of the above: explicit Flux Inpainting + reprojection stages | inpainting_flux, RealESRGAN |
+| **fisheye\_to\_pointcloud.json** | Fisheye 180° → metric depth → point cloud (`.ply`/`.npy`) | — |
+| **PointCloud.json** | Single image → point cloud → cleaned novel-view render | Image-Filters (optional) |
+| **pointcloud\_walker.json** | Image → point cloud → camera fly-through WEBM | — |
+| **test\_pointcloud\_loading.json** | Reload a saved point cloud and orbit-render it | — |
+| **record\_trajectory.json** | Record a camera trajectory `.npy` for LoadTrajectory (two poses → SE(3) interpolation → SaveTrajectory) | — |
+| **pointcloud\_inpaint.json** | Enrich a cloud: Flux-inpaint disocclusions, lift them to 3D, merge, orbit render | inpainting_flux |
+| **PC\_enricher.json** | One-node version of the above: `PointcloudTrajectoryEnricher` along a saved trajectory | inpainting_flux |
+| **sbs180\_workflow.json** | Synthesize the second eye of a VR180 stereo pair from one fisheye view | inpainting_flux |
+| **video\_camera.json** | Re-shoot a video with a new camera move; WAN VACE regenerates disocclusions, Florence2 auto-captions | VHS, Florence2; WAN 2.1 VACE + Video-Depth-Anything models |
+| **wan\_vace\_ref\_to\_video.json** | Still fisheye image + recorded trajectory → WAN VACE camera-move video | WAN 2.1 VACE models; VHS (optional MP4 export) |
+| **video_to_4d_world\.json**            | Video → 4D world: VGGT poses/depth → motion masking → fused static splats + polish → tracked dynamic 4D Gaussians → novel-trajectory render. | — |
+| **video_to_4d_walkable_world\.json**   | Video → 4D WALKABLE world (test-friendly defaults): polished static splats enriched along a walk trajectory (`SplatTrajectoryEnricher`, Flux outpaint + SHARP) → 4D scene → walk-through render + `.ply`/`.npz` exports for free walking in external 3DGS viewers. | inpainting_flux |
+| **fisheye\_static\_video\_to\_4d.json** | Static-camera 180° fisheye video → 4D Gaussian scene → novel-path render. No pose estimation needed: identity trajectory, batched fisheye depth, frame-0 splats split into static world + dynamic canonical. | VHS |
+
+Superseded reference graphs live in `workflows/legacy/` (kept out of the template browser): **outpainting\_fisheye.json** (SD-inpaint-checkpoint variant of the flux outpaint) and **Fisheye\_depth\_workflow\.json** (the multi-view depth fusion that `FisheyeDepthEstimator` now performs internally).
 
 ---
 
@@ -247,9 +261,9 @@ Basic reprojection pipeline: apply masks, rotate pinhole camera, outpaint fishey
   <img src="demo_images/Pinhole_camera_rotation.png" alt="Pinhole Rotation" width="45%" />
 </div>
 
-### 2. `outpainting_fisheye.json`
+### 2. `legacy/outpainting_fisheye.json`
 
-Simplest text‐guided fisheye outpainting built with the core inpaint node.
+Simplest text‐guided fisheye outpainting built with the core inpaint node (superseded by the Flux variant).
 
 ### 3. `outpainting_fisheye_flux.json`
 
@@ -265,9 +279,9 @@ Flux Inpainting ensures sharper results and explicit reprojection stages.
 
 <img src="demo_images/Fisheye_outpainted_flux_dev.png" alt="Flux Dev" width="60%" />
 
-### 5. `Fisheye_depth_workflow.json`
+### 5. `legacy/Fisheye_depth_workflow.json`
 
-Convert fisheye images to metric depth and generate a PLY point cloud.
+Convert fisheye images to metric depth and generate a PLY point cloud — the manual multi-view graph that `FisheyeDepthEstimator` now performs in one node (see `fisheye_to_pointcloud.json`).
 
 <img src="demo_images/Depthmap.png" alt="Fisheye Depth→PointCloud" width="60%" />
 
@@ -277,7 +291,7 @@ Convert fisheye images to metric depth and generate a PLY point cloud.
 
 Quick test for the universal outpaint node in arbitrary views and camera movement
 
-### 7. `Pointcloud.json`
+### 7. `PointCloud.json`
 
 Depth→PointCloud pipeline with interactive camera movement and reprojection views.
 
@@ -297,9 +311,9 @@ Take a wide-angle (fisheye or equirectangular) high-resolution (e.g., 4096×4096
 
 <img src="demo_images/equirect_stereo.gif" alt="Equirectangular Stereo Demo" width="80%" />
 
-### 10. `Pointcloud_walker.json`
+### 10. `pointcloud_walker.json`
 
-Interactive Open3D-based GUI for walking and setting camera trajectory inside pointcloud.
+Image → point cloud → camera fly-through rendered to WEBM (`CameraTrajectoryNode` + `CameraMotionNode`).
 
 ### 11. `video_camera.json`
 

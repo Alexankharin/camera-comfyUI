@@ -4,16 +4,52 @@ import numpy as np
 # reprojection helpers
 from .reprojection_nodes import Projection, ReprojectImage, TransformToMatrix
 
-# Try importing FluxInpainting and capture any ImportError
+import importlib
 import sys, os, logging
-here = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-if here not in sys.path:
-    sys.path.append(here)
 
+# Folder names the ComfyUI-Flux-Inpainting pack may live under in custom_nodes/
+# (install.py clones it as "inpainting_flux"; keep both lists in sync).
+_FLUX_PACK_CANDIDATES = (
+    "inpainting_flux",
+    "ComfyUI-Flux-Inpainting",
+    "ComfyUI-Flux-Inpainting-main",
+    "comfyui-flux-inpainting",
+)
+
+
+def _import_flux_inpainting():
+    """Import FluxNF4Inpainting from the flux inpainting pack regardless of the
+    folder name it was installed under."""
+    custom_nodes_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    comfy_root = os.path.dirname(custom_nodes_dir)
+    if comfy_root not in sys.path:
+        sys.path.append(comfy_root)
+
+    last_error = None
+    for name in _FLUX_PACK_CANDIDATES:
+        if not os.path.isfile(os.path.join(custom_nodes_dir, name, "nodes.py")):
+            continue
+        try:
+            module = importlib.import_module(f"custom_nodes.{name}.nodes")
+            return module.FluxNF4Inpainting
+        except Exception as exc:
+            last_error = exc
+    if last_error is None:
+        last_error = ModuleNotFoundError(
+            "No flux inpainting pack found in custom_nodes (looked for "
+            f"{', '.join(_FLUX_PACK_CANDIDATES)}). It is installed automatically "
+            "by this pack's install.py (run by ComfyUI-Manager); to set it up "
+            f"manually, clone {'https://github.com/rubi-du/ComfyUI-Flux-Inpainting'} "
+            "into custom_nodes/inpainting_flux."
+        )
+    raise last_error
+
+
+# Try importing FluxInpainting and capture any error
 try:
-    from custom_nodes.inpainting_flux.nodes import FluxNF4Inpainting as FluxInpainting
+    FluxInpainting = _import_flux_inpainting()
     _flux_import_error = None
-except ImportError as e:
+except Exception as e:
     FluxInpainting = None
     _flux_import_error = e
     logging.error(f"[OutpaintAnyProjection] could not import FluxNF4Inpainting: {e}")
@@ -71,7 +107,8 @@ class OutpaintAnyProjection:
         if _flux_import_error is not None:
             raise RuntimeError(
                 f"FluxNF4Inpainting is not available: {_flux_import_error}\n"
-                "Please install or fix your inpainting_flux package."
+                "Run this pack's install.py (ComfyUI-Manager does this automatically) "
+                "or install/fix custom_nodes/inpainting_flux."
             )
 
         def normalize_mask(m: torch.Tensor):

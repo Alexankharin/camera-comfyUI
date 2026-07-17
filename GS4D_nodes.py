@@ -180,6 +180,18 @@ def _uv_grid(height: int, width: int, device: torch.device) -> Tuple[torch.Tenso
     return u, v
 
 
+def _uv_in_fov(u: torch.Tensor, v: torch.Tensor, projection: str) -> torch.Tensor:
+    """True where normalized uv lies inside the projection's actual image region.
+
+    For FISHEYE the [-1,1] square contains the corners beyond the image circle
+    (r > 1, i.e. view angles beyond fov/2); pixels there carry no scene content
+    (black corners / garbage depth) and must not be lifted, warped or tracked.
+    """
+    if projection == "FISHEYE":
+        return (u * u + v * v) <= 1.0 + 1e-6
+    return torch.ones_like(u, dtype=torch.bool)
+
+
 def _uv_to_dirs(u: torch.Tensor, v: torch.Tensor, projection: str, horizontal_fov: float) -> torch.Tensor:
     """Unit ray directions [...,3] in camera frame for normalized uv in [-1,1].
 
@@ -222,7 +234,9 @@ def _project_xyz(
 def _projection_valid(
     u: torch.Tensor, v: torch.Tensor, Z: torch.Tensor, projection: str
 ) -> torch.Tensor:
-    """In-image validity for projected points; pinhole additionally requires Z>0."""
+    """In-image validity for projected points; pinhole additionally requires Z>0,
+    fisheye requires the point inside the image circle (r <= 1), not just the
+    [-1,1] square — angles beyond fov/2 can otherwise land in the corners."""
     valid = (
         torch.isfinite(u)
         & torch.isfinite(v)
@@ -233,6 +247,8 @@ def _projection_valid(
     )
     if projection == "PINHOLE":
         valid = valid & (Z > 1e-6)
+    elif projection == "FISHEYE":
+        valid = valid & ((u * u + v * v) <= 1.0 + 1e-6)
     return valid
 
 
@@ -480,6 +496,7 @@ class MotionMaskFromDepth:
 
         u, v = _uv_grid(H, W, target_device)
         dirs = _uv_to_dirs(u, v, input_projection, input_horizontal_fov)  # [H,W,3]
+        in_fov = _uv_in_fov(u, v, input_projection)  # excludes fisheye corners
         gap = max(1, int(frame_gap))
         dynamic = torch.zeros((T, H, W), device=target_device)
 
@@ -490,7 +507,7 @@ class MotionMaskFromDepth:
             tr_t = poses[t, :3, 3]
             # world = (cam - t) @ R  (inverse of cam = world @ R.T + t)
             world = (cam_pts - tr_t) @ R_t
-            has_depth = depth_t > 1e-6
+            has_depth = (depth_t > 1e-6) & in_fov
 
             flagged = torch.zeros((H, W), dtype=torch.bool, device=target_device)
             for t2 in (t + gap, t - gap):
@@ -693,7 +710,10 @@ class TracksToTrajectories:
         # world = (cam - t) @ R  per frame.
         world = torch.bmm(cam - tr.unsqueeze(1), R)
 
-        in_bounds = (u >= -1.0) & (u <= 1.0) & (v >= -1.0) & (v <= 1.0)
+        in_bounds = (
+            (u >= -1.0) & (u <= 1.0) & (v >= -1.0) & (v <= 1.0)
+            & _uv_in_fov(u, v, input_projection)
+        )
         valid = vis & in_bounds & (d > 1e-6) & torch.isfinite(world).all(dim=-1)
         world = torch.where(valid.unsqueeze(-1), world, torch.zeros_like(world))
 

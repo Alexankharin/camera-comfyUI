@@ -2,9 +2,17 @@ transformers==4.50.0
 diffusers==0.33.1
 open3d==0.19.0
 protobuf
+# Runtime deps of the bundled SHARP submodule (submodules/ml-sharpt), so
+# ImageToSplat & co. work out of the box. torch/torchvision/scipy/tqdm come
+# with ComfyUI itself; gsplat and vggt are GitHub/CUDA-flavored and are
+# handled by install.py (run automatically by ComfyUI-Manager).
+click
+timm
+plyfile
+pillow-heif
+matplotlib
+imageio
+imageio-ffmpeg
 # open3d is optional, see pointcloud_nodes.py
 # Python version: 3.12.x (used by embedded python)
-# All versions pinned to match embedded environment
 # If using a different Python, adjust versions accordingly
-# For full reproducibility, consider using a virtual environment
-# and pip freeze > requirements.txt

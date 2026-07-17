@@ -71,7 +71,8 @@ def _load_outpaint_node_class():
         raise RuntimeError(
             "OutpaintAnyProjection could not be imported from flux_fisheye_filling_nodes. "
             "It requires the inpainting_flux custom node package (Flux NF4 inpainting, "
-            "diffusers). Install/fix custom_nodes/inpainting_flux and its dependencies. "
+            "diffusers), which this pack's install.py sets up automatically (ComfyUI-Manager "
+            "runs it on install). Run install.py or fix custom_nodes/inpainting_flux. "
             f"Import error: {exc}"
         ) from exc
 

@@ -1,7 +1,7 @@
 {
   "id": "dd56c0bf-7405-406e-924f-42b2feacb73f",
   "revision": 0,
-  "last_node_id": 8,
+  "last_node_id": 9,
   "last_link_id": 9,
   "nodes": [
     {
@@ -87,7 +87,8 @@
         0,
         false,
         false
-      ]
+      ],
+      "title": "Render motion"
     },
     {
       "id": 6,
@@ -118,7 +119,8 @@
       },
       "widgets_values": [
         "ComfyUIPointCloud_00001.ply"
-      ]
+      ],
+      "title": "Load saved cloud (.ply/.npy)"
     },
     {
       "id": 1,
@@ -153,7 +155,8 @@
         0,
         0,
         0
-      ]
+      ],
+      "title": "Start pose (identity)"
     },
     {
       "id": 5,
@@ -188,7 +191,8 @@
         0,
         0,
         0
-      ]
+      ],
+      "title": "End pose (dolly +0.1)"
     },
     {
       "id": 8,
@@ -228,7 +232,33 @@
       "properties": {
         "Node name for S&R": "CameraInterpolationNode"
       },
-      "widgets_values": []
+      "widgets_values": [
+        2
+      ]
+    },
+    {
+      "id": 9,
+      "type": "MarkdownNote",
+      "title": "About this workflow",
+      "pos": [
+        -1097.2319946289062,
+        1294.427734375
+      ],
+      "size": [
+        520,
+        236
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "properties": {},
+      "widgets_values": [
+        "# Load a saved point cloud & orbit\n\nReloads a point cloud saved by SavePointCloud and renders a short camera move between two poses (identity → 0.1 forward) as a WEBM.\n\n- **Set:** the file in LoadPointCloud (dropdown lists the ComfyUI input dir — run `PointCloud.json` or `fisheye_to_pointcloud.json` first); the two TransformToMatrix poses.\n- **Requires:** nothing beyond this pack."
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
     }
   ],
   "links": [
@@ -283,7 +313,8 @@
         -1186.3099424359816
       ]
     },
-    "frontendVersion": "1.21.7"
+    "frontendVersion": "1.21.7",
+    "camera_comfyui_rev": 1
   },
   "version": 0.4
 }

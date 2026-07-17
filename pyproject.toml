@@ -1,13 +1,23 @@
 [project]
 name = "camera-comfyui"
 description = "Custom ComfyUI nodes for camera projections (pinhole/fisheye/equirectangular), depth, point clouds, camera trajectories, and 3D/4D Gaussian splatting — including video-to-4D-world workflows."
-version = "1.0.0"
+version = "1.1.0"
 license = { file = "LICENSE" }
+# Keep in sync with requirements.txt. GitHub/CUDA-flavored extras (vggt,
+# gsplat) and the ComfyUI-Flux-Inpainting sibling pack are installed by
+# install.py, which ComfyUI-Manager runs automatically after install.
 dependencies = [
     "transformers==4.50.0",
     "diffusers==0.33.1",
     "open3d==0.19.0",
     "protobuf",
+    "click",
+    "timm",
+    "plyfile",
+    "pillow-heif",
+    "matplotlib",
+    "imageio",
+    "imageio-ffmpeg",
 ]
 
 [project.urls]
