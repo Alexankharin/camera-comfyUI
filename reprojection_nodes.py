@@ -241,6 +241,10 @@ class ReprojectImage:
 
         # Sample input image using the grid
         grid = grid.unsqueeze(0)  # Add batch dimension
+        if grid.shape[0] != image_tensor.shape[0]:
+            # grid_sample requires matching batch sizes; the grid is identical
+            # for every frame, so share it across the batch as a view.
+            grid = grid.expand(image_tensor.shape[0], -1, -1, -1)
         sampled_tensor = torch.nn.functional.grid_sample(
             image_tensor, grid, mode='nearest', padding_mode='border', align_corners=False
         )
@@ -261,6 +265,8 @@ class ReprojectImage:
                 mask = mask.unsqueeze(0).unsqueeze(0)  # Add batch and channel dimensions
             elif mask.dim() == 3:
                 mask = mask.unsqueeze(0)  # Add batch dimension
+            if mask.shape[0] != grid.shape[0]:
+                mask = mask.expand(grid.shape[0], -1, -1, -1)
 
             sampled_mask = torch.nn.functional.grid_sample(
                 mask, grid, mode='nearest', padding_mode='border', align_corners=False
@@ -505,6 +511,10 @@ class ReprojectDepth:
         grid = map_grid(grid, input_projection, output_projection,
                         input_horizontal_fov, output_horizontal_fov, T)
         grid = grid.unsqueeze(0)  # add batch
+        if grid.shape[0] != B:
+            # grid_sample requires matching batch sizes; the grid is identical
+            # for every frame, so share it across the batch as a view.
+            grid = grid.expand(B, -1, -1, -1)
 
         # Sample depth
         sampled = torch.nn.functional.grid_sample(

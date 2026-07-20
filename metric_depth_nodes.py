@@ -54,25 +54,29 @@ class DepthEstimatorNode:
         if model_name not in _PIPELINES:
             _PIPELINES[model_name] = pipeline(
                 task="depth-estimation",
-                model=f"depth-anything/{model_name}"
+                model=f"depth-anything/{model_name}",
+                device=0 if torch.cuda.is_available() else -1,
             )
         pipe = _PIPELINES[model_name]
 
-        # Convert BHWC [1,H,W,3] float to HxW uint8
-        img_np = (image[0].cpu().numpy() * 255).astype(np.uint8)
-        pil_img = Image.fromarray(img_np)
+        # Convert BHWC [B,H,W,3] float batch to PIL images
+        imgs_np = (image.cpu().numpy() * 255).astype(np.uint8)
+        pil_imgs = [Image.fromarray(a) for a in imgs_np]
 
-        # Inference
-        out = pipe(pil_img)
-        pred = out["predicted_depth"] * depth_scale  # numpy array or torch?
-        if isinstance(pred, np.ndarray):
-            depth_map = torch.from_numpy(pred)
-        else:
-            depth_map = pred
-        depth_map = depth_map.to(dtype=torch.float32, device=image.device)
+        # Inference — the pipeline accepts a list; run the whole batch
+        outs = pipe(pil_imgs, batch_size=8)
+        if isinstance(outs, dict):  # single-image call returns a dict
+            outs = [outs]
+        preds = []
+        for out in outs:
+            pred = out["predicted_depth"] * depth_scale  # numpy array or torch?
+            if isinstance(pred, np.ndarray):
+                pred = torch.from_numpy(pred)
+            preds.append(pred)
+        depth_map = torch.stack(preds).to(dtype=torch.float32, device=image.device)
 
-        # Depth_map is [H,W]; add batch & channel dims: [1,1,H,W]
-        depth = depth_map.unsqueeze(0).unsqueeze(0)
+        # Depth_map is [B,H,W]; add channel dim: [B,1,H,W]
+        depth = depth_map.unsqueeze(1)
 
         # Median blur if kernel > 1
         k = median_blur_kernel
@@ -82,11 +86,11 @@ class DepthEstimatorNode:
             padded = F.pad(depth, (pad, pad, pad, pad), mode='reflect')
             # shape [1,1,H+k-1, W+k-1]
             patches = padded.unfold(2, k, 1).unfold(3, k, 1)
-            # [1,1,H,W,k,k]
-            patches = patches.contiguous().view(1,1,depth.shape[2], depth.shape[3], k*k)
+            # [B,1,H,W,k,k]
+            patches = patches.contiguous().view(depth.shape[0], 1, depth.shape[2], depth.shape[3], k*k)
             depth, _ = patches.median(dim=-1)
 
-        # Final shape [1,H,W,1]
+        # Final shape [B,H,W,1]
         depth = depth.permute(0,2,3,1)
         return (depth,)
 
@@ -118,22 +122,25 @@ class DepthToImageNode:
         invert_depth: bool = False,
 
     ) -> Tuple[torch.Tensor]:
-        # depth: [1, H, W, 1]
-        d = depth.squeeze(0).squeeze(-1)  # [H, W]
-        # find non-zero min/max
+        # depth: [B, H, W, 1] / [B, H, W] / [H, W] → [B, H, W]
+        d = depth
+        if d.dim() == 4:
+            d = d.squeeze(-1)
+        elif d.dim() == 2:
+            d = d.unsqueeze(0)
+        # find non-zero min/max over the whole batch so a sequence normalizes
+        # consistently (no per-frame flicker)
         d_min = d[d > 0].min()
         d_max = d[d > 0].max()
         # clamp to min/max
         d = torch.clamp(d, min=d_min, max=d_max)
         if invert_depth:
             d = 1.0/d # avoid div by zero
-        # if either clamp bound is None, compute from tensor
-        # normalize to 0–1 using vmin/vmax
+        # normalize to 0–1
         d_norm = d - d.min()
         d_norm = d_norm / (d_norm.max() - d_norm.min() + 1e-6)
-        # replicate to RGB and batch dims: [1, H, W, 3]
-        img = d_norm.unsqueeze(-1).repeat(1, 1, 3)  # [H, W, 3]
-        img = img.unsqueeze(0)
+        # replicate to RGB: [B, H, W, 3]
+        img = d_norm.unsqueeze(-1).repeat(1, 1, 1, 3)
         return (img,)
 
 class ZDepthToRayDepthNode:
@@ -165,9 +172,13 @@ class ZDepthToRayDepthNode:
         depth: torch.Tensor,
         fov: float,
     ) -> Tuple[torch.Tensor]:
-        # depth: [1, H, W, 1]  → squeeze out batch & channel dims → [H, W]
-        d = depth.clone().detach().squeeze(0).squeeze(-1)
-        H, W = d.shape
+        # depth: [B, H, W, 1] (or [H, W]) → drop channel dim → [B, H, W]
+        d = depth.clone().detach()
+        if d.dim() == 4:
+            d = d.squeeze(-1)
+        elif d.dim() == 2:
+            d = d.unsqueeze(0)
+        B, H, W = d.shape
         device = d.device
 
         # Convert horizontal FOV to focal length (px)
@@ -191,11 +202,11 @@ class ZDepthToRayDepthNode:
         # Per-pixel ray-length factor = ||[x, y, 1]||
         factor = torch.sqrt(1 + x**2 + y**2)
 
-        # Ray-depth = metric depth (z) × ray-length factor
-        ray_depth = d * factor  # → [H, W]
+        # Ray-depth = metric depth (z) × ray-length factor (broadcast over batch)
+        ray_depth = d * factor  # → [B, H, W]
 
-        # Restore batch & channel dims → [1, H, W, 1]
-        ray_depth = ray_depth.unsqueeze(0).unsqueeze(-1)
+        # Restore channel dim → [B, H, W, 1]
+        ray_depth = ray_depth.unsqueeze(-1)
 
         return (ray_depth,)
 
@@ -376,18 +387,47 @@ class DepthRenormalizer:
             B(x,y) = b0 + b1*(x-0.5)**2 + b2*(y-0.5)**2
         so that it best matches guidance_depth over valid pixels,
         then apply it everywhere (including holes).
+
+        Batch-aware: inputs may be [B,H,W,1] / [B,H,W] / [H,W]; each frame is
+        fitted independently and the result is returned as [B,H,W,1].
         """
-        # collapse [1,H,W,1] → [H,W]
-        def hw(t):
-            t = t.squeeze(0).squeeze(-1)
-            if t.dim() == 3:
-                t = t.mean(dim=2)
+        # normalize any of [B,H,W,C] / [B,H,W] / [H,W] → [B,H,W]
+        def bhw(t):
+            if t.dim() == 4:
+                t = t.squeeze(-1) if t.shape[-1] == 1 else t.mean(dim=-1)
+            elif t.dim() == 2:
+                t = t.unsqueeze(0)
             return t
 
-        d   = hw(depth)           # [H,W]
-        gd  = hw(guidance_depth)  # [H,W]
-        dm  = hw(depth_mask)  > 0.5
-        gm  = hw(guidance_mask) > 0.5
+        d_all  = bhw(depth)           # [B,H,W]
+        gd_all = bhw(guidance_depth)  # [B,H,W]
+        dm_all = bhw(depth_mask)  > 0.5
+        gm_all = bhw(guidance_mask) > 0.5
+        B = d_all.shape[0]
+        # broadcast singleton batches (e.g. one guidance frame for a video)
+        if gd_all.shape[0] == 1 and B > 1:
+            gd_all = gd_all.expand(B, -1, -1)
+        if dm_all.shape[0] == 1 and B > 1:
+            dm_all = dm_all.expand(B, -1, -1)
+        if gm_all.shape[0] == 1 and B > 1:
+            gm_all = gm_all.expand(B, -1, -1)
+
+        outs = []
+        for b in range(B):
+            outs.append(self._renormalize_single(
+                d_all[b], gd_all[b], dm_all[b], gm_all[b], use_inverse))
+        out = torch.stack(outs)  # [B,H,W]
+        # restore [B,H,W,1]
+        return (out.unsqueeze(-1),)
+
+    def _renormalize_single(
+        self,
+        d: torch.Tensor,       # [H,W]
+        gd: torch.Tensor,      # [H,W]
+        dm: torch.Tensor,      # [H,W] bool
+        gm: torch.Tensor,      # [H,W] bool
+        use_inverse: bool,
+    ) -> torch.Tensor:
 
         # choose linear or inverse-depth space
         eps = 1e-6
@@ -458,10 +498,7 @@ class DepthRenormalizer:
             out_work = A_map * d_work + B_map
 
         # convert back if inverse-depth
-        out = (1.0 / out_work.clamp(min=eps)) if use_inverse else out_work
-        # print("out", out.shape, out.min(), out.max(), out.mean(), out.std(), "valid", valid.sum(),dv.sum(),gv.sum())
-        # restore [1,H,W,1]
-        return (out.unsqueeze(0).unsqueeze(-1),)
+        return (1.0 / out_work.clamp(min=eps)) if use_inverse else out_work
     
 
 NODE_CLASS_MAPPINGS = {

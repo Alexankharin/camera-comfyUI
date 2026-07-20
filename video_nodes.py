@@ -16,20 +16,32 @@ _here = os.path.dirname(os.path.abspath(__file__))
 # climb up 3 levels: camera-comfyUI → custom_nodes → ComfyUI
 COMFYUI_ROOT = os.path.abspath(os.path.join(_here, os.pardir, os.pardir))
 
-# point at metric_depth inside the Video-Depth-Anything clone at the ComfyUI root
-video_depth_path = os.path.join(COMFYUI_ROOT, "Video-Depth-Anything", "metric_depth")
-
-# insert at front so it always wins
-if video_depth_path not in sys.path:
-    sys.path.insert(0, video_depth_path)
-NO_VIDEO_DEPTH_ANYTHING= False
-try:
-    from video_depth_anything.video_depth import VideoDepthAnything
-    print("✅ video_depth_anything module loaded successfully.")
-except ImportError as e:
-    NO_VIDEO_DEPTH_ANYTHING = True
+# The Video-Depth-Anything clone at the ComfyUI root. Older checkouts kept the
+# metric model under metric_depth/; current upstream has one unified package at
+# the repo root (VideoDepthAnything(metric=True)). Try both.
+_vda_candidates = [
+    os.path.join(COMFYUI_ROOT, "Video-Depth-Anything"),
+    os.path.join(COMFYUI_ROOT, "Video-Depth-Anything", "metric_depth"),
+]
+NO_VIDEO_DEPTH_ANYTHING = True
+video_depth_path = _vda_candidates[0]
+for _cand in _vda_candidates:
+    if not os.path.isdir(os.path.join(_cand, "video_depth_anything")):
+        continue
+    if _cand not in sys.path:
+        sys.path.insert(0, _cand)
+    try:
+        from video_depth_anything.video_depth import VideoDepthAnything
+        NO_VIDEO_DEPTH_ANYTHING = False
+        video_depth_path = _cand
+        print(f"✅ video_depth_anything module loaded from {_cand!r}.")
+        break
+    except ImportError as e:
+        print(f"❌ Could not load video_depth_anything from {_cand!r}: {e}")
+if NO_VIDEO_DEPTH_ANYTHING:
     print(
-        f"❌ Could not load video_depth_anything from {video_depth_path!r}: {e}"
+        f"❌ video_depth_anything not available. Clone "
+        f"https://github.com/DepthAnything/Video-Depth-Anything into {COMFYUI_ROOT!r}."
     )
 
 class VideoCameraMotionSequence:
@@ -279,7 +291,13 @@ class VideoMetricDepthEstimate:
             checkpoint_path = os.path.join(model_dir, model_checkpoint)
             if not os.path.isfile(checkpoint_path):
                 raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
-            model = VideoDepthAnything(**{"encoder": "vitl", "features": 256, "out_channels": [256,512,1024,1024]})
+            # metric checkpoints (metric_video_depth_anything_*.pth) need metric=True
+            # on current upstream; older metric_depth/ checkouts ignore the kwarg.
+            kwargs = {"encoder": "vitl", "features": 256, "out_channels": [256, 512, 1024, 1024]}
+            try:
+                model = VideoDepthAnything(**kwargs, metric="metric" in model_checkpoint.lower())
+            except TypeError:
+                model = VideoDepthAnything(**kwargs)
             state = torch.load(checkpoint_path, map_location='cpu')
             model.load_state_dict(state, strict=True)
             model = model.to(device).eval()
