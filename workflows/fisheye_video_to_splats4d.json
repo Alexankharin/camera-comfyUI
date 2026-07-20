@@ -1,0 +1,2029 @@
+{
+ "id": "00000000-0000-0000-0000-000000000000",
+ "revision": 0,
+ "last_node_id": 47,
+ "last_link_id": 49,
+ "nodes": [
+  {
+   "id": 30,
+   "type": "MarkdownNote",
+   "pos": [
+    -620,
+    -40
+   ],
+   "size": [
+    560,
+    900
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [],
+   "properties": {},
+   "widgets_values": [
+    "# Fisheye video \u2192 per-frame splats \u2192 .splat4d\n\nEvery frame becomes its own 3D splat cloud; a video depth model\n(Video-Depth-Anything, metric) keeps geometry consistent across frames, and\nWAN 2.1 VACE fills the background that is never revealed behind moving\nobjects.\n\n**Stages**\n1. **VideoMetricDepthEstimate** \u2014 temporally consistent metric depth (needs\n   the Video-Depth-Anything repo at the ComfyUI root and\n   `metric_video_depth_anything_vitl.pth` in models/checkpoints).\n2. **TemporalStaticPlate** \u2014 static/dynamic split from temporal median color\n   AND depth deviation; closing fills body interiors; background hidden\n   behind movers is completed from deepest-depth observations. Its\n   `unobserved_mask` marks background nobody ever saw.\n   \u26a0 open/close/dilate radii are in pixels \u2014 scale them with resolution\n   (defaults here are tuned for 2048\u00b2).\n3. **WAN VACE disocclusion fill (render space)** \u2014 the novel-view splat\n   render + its inverted coverage mask go through WanVaceToVideo: WAN fills\n   exactly the pixels no splat covered (disocclusions, hair fringes),\n   temporally consistently. Inpainting the fisheye directly does NOT work \u2014\n   WAN warps wide-angle geometry \u2014 so the fill happens on pinhole renders.\n   Models: wan2.1_vace_14B_fp16, umt5_xxl_fp8_e4m3fn_scaled, wan_2.1_vae.\n4. **SplatFramesFromVideo** \u2014 per-frame splats: shared static base + per-frame\n   dynamic splats; constant count & pixel-identity order; depth-edge\n   'flying pixels' suppressed (resolution-independent threshold).\n5. **RenderSplatSequence** \u2014 novel-trajectory render + fisheye replay.\n5b. **BakeRenderFill** \u2014 unprojects the WAN-filled hole pixels (depth\n   continued from the surrounding rendered background) into the STATIC\n   splat layer \u2192 the exported .splat4d handles occlusions itself.\n   Check the `novel_baked` WEBM: raw render of the baked scene.\n6. **SaveSplats4DVideo** \u2014 antimatter15 .splat frames \u2192 one streamable\n   .splat4d (pip install splats4d; viewer in the splats4D repo).\n\n**Previews**: depth video, motion-mask video, novel WEBM (raw + WAN-filled), replay WEBM.\n\n**Tune**: color/depth thresholds & close_radius (mask coverage),\nedge_threshold (silhouette streaks), splat_scale (pinholes vs blur),\nstride (splat count), WAN prompt (describe the empty scene!)."
+   ],
+   "title": "About this workflow"
+  },
+  {
+   "id": 1,
+   "type": "VHS_LoadVideoPath",
+   "pos": [
+    0,
+    0
+   ],
+   "size": [
+    320,
+    290
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "meta_batch",
+     "type": "VHS_BatchManager",
+     "link": null
+    },
+    {
+     "name": "vae",
+     "type": "VAE",
+     "link": null
+    }
+   ],
+   "outputs": [
+    {
+     "name": "IMAGE",
+     "type": "IMAGE",
+     "links": [
+      1,
+      2,
+      33
+     ],
+     "slot_index": 0
+    },
+    {
+     "name": "frame_count",
+     "type": "INT",
+     "links": [],
+     "slot_index": 1
+    },
+    {
+     "name": "audio",
+     "type": "AUDIO",
+     "links": [],
+     "slot_index": 2
+    },
+    {
+     "name": "video_info",
+     "type": "VHS_VIDEOINFO",
+     "links": [],
+     "slot_index": 3
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "VHS_LoadVideoPath"
+   },
+   "widgets_values": {
+    "video": "input/35457_left_fisheye_2048.mp4",
+    "force_rate": 0,
+    "custom_width": 0,
+    "custom_height": 0,
+    "frame_load_cap": 49,
+    "skip_first_frames": 90,
+    "select_every_nth": 1,
+    "format": "AnimateDiff",
+    "videopreview": {
+     "hidden": false,
+     "paused": false,
+     "params": {
+      "filename": "input/35457_left_fisheye_2048.mp4",
+      "type": "path",
+      "format": "video/mp4"
+     }
+    }
+   }
+  },
+  {
+   "id": 2,
+   "type": "VideoMetricDepthEstimate",
+   "pos": [
+    400,
+    0
+   ],
+   "size": [
+    320,
+    134
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "frames",
+     "type": "IMAGE",
+     "link": 1
+    }
+   ],
+   "outputs": [
+    {
+     "name": "metric_depths",
+     "type": "TENSOR",
+     "links": [
+      3,
+      34,
+      45
+     ],
+     "slot_index": 0
+    },
+    {
+     "name": "fps",
+     "type": "FLOAT",
+     "links": [],
+     "slot_index": 1
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "VideoMetricDepthEstimate"
+   },
+   "widgets_values": [
+    "metric_video_depth_anything_vitl.pth",
+    518,
+    30
+   ]
+  },
+  {
+   "id": 3,
+   "type": "TemporalStaticPlate",
+   "pos": [
+    800,
+    0
+   ],
+   "size": [
+    320,
+    342
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "frames",
+     "type": "IMAGE",
+     "link": 2
+    },
+    {
+     "name": "depth_seq",
+     "type": "TENSOR",
+     "link": 3
+    }
+   ],
+   "outputs": [
+    {
+     "name": "static_rgb",
+     "type": "IMAGE",
+     "links": [
+      35,
+      48
+     ],
+     "slot_index": 0
+    },
+    {
+     "name": "static_depth",
+     "type": "TENSOR",
+     "links": [
+      36
+     ],
+     "slot_index": 1
+    },
+    {
+     "name": "masks",
+     "type": "MASK",
+     "links": [],
+     "slot_index": 2
+    },
+    {
+     "name": "union_mask",
+     "type": "MASK",
+     "links": [
+      37
+     ],
+     "slot_index": 3
+    },
+    {
+     "name": "mask_preview",
+     "type": "IMAGE",
+     "links": [
+      47
+     ],
+     "slot_index": 4
+    },
+    {
+     "name": "unobserved_mask",
+     "type": "MASK",
+     "links": [],
+     "slot_index": 5
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "TemporalStaticPlate"
+   },
+   "widgets_values": [
+    0.1,
+    0.1,
+    4,
+    32,
+    96,
+    12,
+    1,
+    0.85,
+    0.25,
+    "auto"
+   ]
+  },
+  {
+   "id": 21,
+   "type": "InvertMask",
+   "pos": [
+    2150,
+    1100
+   ],
+   "size": [
+    320,
+    120
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "mask",
+     "type": "MASK",
+     "link": 4
+    }
+   ],
+   "outputs": [
+    {
+     "name": "MASK",
+     "type": "MASK",
+     "links": [
+      5
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "InvertMask"
+   },
+   "widgets_values": []
+  },
+  {
+   "id": 41,
+   "type": "ScaleMasks",
+   "pos": [
+    2250,
+    1100
+   ],
+   "size": [
+    320,
+    186
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "masks",
+     "type": "MASK",
+     "link": 5
+    }
+   ],
+   "outputs": [
+    {
+     "name": "masks",
+     "type": "MASK",
+     "links": [
+      6
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "ScaleMasks"
+   },
+   "widgets_values": [
+    1024,
+    1024,
+    true,
+    0.4,
+    0
+   ]
+  },
+  {
+   "id": 40,
+   "type": "GrowMask",
+   "pos": [
+    2350,
+    1100
+   ],
+   "size": [
+    320,
+    120
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "mask",
+     "type": "MASK",
+     "link": 6
+    }
+   ],
+   "outputs": [
+    {
+     "name": "MASK",
+     "type": "MASK",
+     "links": [
+      14
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "GrowMask"
+   },
+   "widgets_values": [
+    6,
+    true
+   ]
+  },
+  {
+   "id": 22,
+   "type": "UNETLoader",
+   "pos": [
+    1750,
+    1250
+   ],
+   "size": [
+    320,
+    120
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "MODEL",
+     "type": "MODEL",
+     "links": [
+      7
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "UNETLoader"
+   },
+   "widgets_values": [
+    "wan2.1_vace_14B_fp16.safetensors",
+    "default"
+   ]
+  },
+  {
+   "id": 23,
+   "type": "ModelSamplingSD3",
+   "pos": [
+    2050,
+    1250
+   ],
+   "size": [
+    320,
+    120
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "model",
+     "type": "MODEL",
+     "link": 7
+    }
+   ],
+   "outputs": [
+    {
+     "name": "MODEL",
+     "type": "MODEL",
+     "links": [
+      15
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "ModelSamplingSD3"
+   },
+   "widgets_values": [
+    8.0
+   ]
+  },
+  {
+   "id": 24,
+   "type": "CLIPLoader",
+   "pos": [
+    1750,
+    1400
+   ],
+   "size": [
+    320,
+    120
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "CLIP",
+     "type": "CLIP",
+     "links": [
+      8,
+      9
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "CLIPLoader"
+   },
+   "widgets_values": [
+    "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+    "wan",
+    "default"
+   ]
+  },
+  {
+   "id": 25,
+   "type": "CLIPTextEncode",
+   "pos": [
+    2050,
+    1400
+   ],
+   "size": [
+    320,
+    120
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "clip",
+     "type": "CLIP",
+     "link": 8
+    }
+   ],
+   "outputs": [
+    {
+     "name": "CONDITIONING",
+     "type": "CONDITIONING",
+     "links": [
+      10
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "CLIPTextEncode"
+   },
+   "widgets_values": [
+    "empty living room interior: flat white wall, hallway with wooden floor, dark grey sectional sofa, window with dark curtains, clean smooth surfaces, photorealistic, consistent lighting"
+   ]
+  },
+  {
+   "id": 26,
+   "type": "CLIPTextEncode",
+   "pos": [
+    2050,
+    1650
+   ],
+   "size": [
+    320,
+    120
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "clip",
+     "type": "CLIP",
+     "link": 9
+    }
+   ],
+   "outputs": [
+    {
+     "name": "CONDITIONING",
+     "type": "CONDITIONING",
+     "links": [
+      11
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "CLIPTextEncode"
+   },
+   "widgets_values": [
+    "hair, \u5934\u53d1, curls, fur, plants, flowers, \u4eba\u7269, \u4eba, people, person, hands, body, skin, \u8272\u8c03\u8273\u4e3d\uff0c\u8fc7\u66dd\uff0c\u9759\u6001\uff0c\u7ec6\u8282\u6a21\u7cca\u4e0d\u6e05\uff0c\u5b57\u5e55\uff0c\u98ce\u683c\uff0c\u4f5c\u54c1\uff0c\u753b\u4f5c\uff0c\u753b\u9762\uff0c\u9759\u6b62\uff0c\u6574\u4f53\u53d1\u7070\uff0c\u6700\u5dee\u8d28\u91cf\uff0c\u4f4e\u8d28\u91cf\uff0cJPEG\u538b\u7f29\u6b8b\u7559\uff0c\u4e11\u964b\u7684\uff0c\u6b8b\u7f3a\u7684\uff0c\u591a\u4f59\u7684\u624b\u6307\uff0c\u753b\u5f97\u4e0d\u597d\u7684\u624b\u90e8\uff0c\u753b\u5f97\u4e0d\u597d\u7684\u8138\u90e8\uff0c\u7578\u5f62\u7684\uff0c\u6bc1\u5bb9\u7684\uff0c\u5f62\u6001\u7578\u5f62\u7684\u80a2\u4f53\uff0c\u624b\u6307\u878d\u5408\uff0c\u9759\u6b62\u4e0d\u52a8\u7684\u753b\u9762\uff0c\u6742\u4e71\u7684\u80cc\u666f\uff0c\u4e09\u6761\u817f\uff0c\u80cc\u666f\u4eba\u5f88\u591a\uff0c\u5012\u7740\u8d70"
+   ]
+  },
+  {
+   "id": 27,
+   "type": "VAELoader",
+   "pos": [
+    1750,
+    1550
+   ],
+   "size": [
+    320,
+    120
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "VAE",
+     "type": "VAE",
+     "links": [
+      12,
+      22
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "VAELoader"
+   },
+   "widgets_values": [
+    "wan_2.1_vae.safetensors"
+   ]
+  },
+  {
+   "id": 28,
+   "type": "WanVaceToVideo",
+   "pos": [
+    2550,
+    1250
+   ],
+   "size": [
+    320,
+    316
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "positive",
+     "type": "CONDITIONING",
+     "link": 10
+    },
+    {
+     "name": "negative",
+     "type": "CONDITIONING",
+     "link": 11
+    },
+    {
+     "name": "vae",
+     "type": "VAE",
+     "link": 12
+    },
+    {
+     "name": "control_video",
+     "type": "IMAGE",
+     "link": 13
+    },
+    {
+     "name": "control_masks",
+     "type": "MASK",
+     "link": 14
+    },
+    {
+     "name": "reference_image",
+     "type": "IMAGE",
+     "link": null
+    }
+   ],
+   "outputs": [
+    {
+     "name": "positive",
+     "type": "CONDITIONING",
+     "links": [
+      16
+     ],
+     "slot_index": 0
+    },
+    {
+     "name": "negative",
+     "type": "CONDITIONING",
+     "links": [
+      17
+     ],
+     "slot_index": 1
+    },
+    {
+     "name": "latent",
+     "type": "LATENT",
+     "links": [
+      18
+     ],
+     "slot_index": 2
+    },
+    {
+     "name": "trim_latent",
+     "type": "INT",
+     "links": [
+      20
+     ],
+     "slot_index": 3
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "WanVaceToVideo"
+   },
+   "widgets_values": [
+    1024,
+    1024,
+    49,
+    1,
+    1.0
+   ]
+  },
+  {
+   "id": 29,
+   "type": "KSampler",
+   "pos": [
+    2850,
+    1250
+   ],
+   "size": [
+    320,
+    290
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "model",
+     "type": "MODEL",
+     "link": 15
+    },
+    {
+     "name": "positive",
+     "type": "CONDITIONING",
+     "link": 16
+    },
+    {
+     "name": "negative",
+     "type": "CONDITIONING",
+     "link": 17
+    },
+    {
+     "name": "latent_image",
+     "type": "LATENT",
+     "link": 18
+    }
+   ],
+   "outputs": [
+    {
+     "name": "LATENT",
+     "type": "LATENT",
+     "links": [
+      19
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "KSampler"
+   },
+   "widgets_values": [
+    7,
+    24,
+    6.0,
+    "uni_pc",
+    "simple",
+    1.0
+   ]
+  },
+  {
+   "id": 31,
+   "type": "TrimVideoLatent",
+   "pos": [
+    3150,
+    1250
+   ],
+   "size": [
+    320,
+    120
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "samples",
+     "type": "LATENT",
+     "link": 19
+    },
+    {
+     "name": "trim_amount",
+     "type": "INT",
+     "link": 20
+    }
+   ],
+   "outputs": [
+    {
+     "name": "LATENT",
+     "type": "LATENT",
+     "links": [
+      21
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "TrimVideoLatent"
+   },
+   "widgets_values": []
+  },
+  {
+   "id": 32,
+   "type": "VAEDecode",
+   "pos": [
+    3350,
+    1250
+   ],
+   "size": [
+    320,
+    120
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "samples",
+     "type": "LATENT",
+     "link": 21
+    },
+    {
+     "name": "vae",
+     "type": "VAE",
+     "link": 22
+    }
+   ],
+   "outputs": [
+    {
+     "name": "IMAGE",
+     "type": "IMAGE",
+     "links": [
+      23,
+      26
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "VAEDecode"
+   },
+   "widgets_values": []
+  },
+  {
+   "id": 33,
+   "type": "SaveWEBM",
+   "pos": [
+    3550,
+    1250
+   ],
+   "size": [
+    320,
+    160
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "images",
+     "type": "IMAGE",
+     "link": 23
+    }
+   ],
+   "outputs": [
+    {
+     "name": "images",
+     "type": "IMAGE",
+     "links": [],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "SaveWEBM"
+   },
+   "widgets_values": [
+    "v4d/novel_wan",
+    "vp9",
+    24,
+    20
+   ]
+  },
+  {
+   "id": 45,
+   "type": "BakeRenderFill",
+   "pos": [
+    3550,
+    700
+   ],
+   "size": [
+    320,
+    316
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "splat_frames",
+     "type": "GSPLAT_SEQ",
+     "link": 24
+    },
+    {
+     "name": "static_count",
+     "type": "INT",
+     "link": 25
+    },
+    {
+     "name": "filled_images",
+     "type": "IMAGE",
+     "link": 26
+    },
+    {
+     "name": "coverage",
+     "type": "MASK",
+     "link": 27
+    },
+    {
+     "name": "disparities",
+     "type": "TENSOR",
+     "link": 28
+    },
+    {
+     "name": "trajectory",
+     "type": "TENSOR",
+     "link": 29
+    }
+   ],
+   "outputs": [
+    {
+     "name": "splat_frames",
+     "type": "GSPLAT_SEQ",
+     "links": [
+      30,
+      49
+     ],
+     "slot_index": 0
+    },
+    {
+     "name": "baked_splats",
+     "type": "GSPLAT",
+     "links": [],
+     "slot_index": 1
+    },
+    {
+     "name": "baked_count",
+     "type": "INT",
+     "links": [],
+     "slot_index": 2
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "BakeRenderFill"
+   },
+   "widgets_values": [
+    90.0,
+    -1,
+    0.35,
+    1.3,
+    0.95
+   ]
+  },
+  {
+   "id": 46,
+   "type": "RenderSplatSequence",
+   "pos": [
+    3850,
+    700
+   ],
+   "size": [
+    320,
+    238
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "splat_frames",
+     "type": "GSPLAT_SEQ",
+     "link": 30
+    },
+    {
+     "name": "trajectory",
+     "type": "TENSOR",
+     "link": 31
+    }
+   ],
+   "outputs": [
+    {
+     "name": "images",
+     "type": "IMAGE",
+     "links": [
+      32
+     ],
+     "slot_index": 0
+    },
+    {
+     "name": "masks",
+     "type": "MASK",
+     "links": [],
+     "slot_index": 1
+    },
+    {
+     "name": "disparities",
+     "type": "TENSOR",
+     "links": [],
+     "slot_index": 2
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "RenderSplatSequence"
+   },
+   "widgets_values": [
+    "PINHOLE",
+    90.0,
+    1024,
+    1024,
+    "auto",
+    "auto"
+   ]
+  },
+  {
+   "id": 47,
+   "type": "SaveWEBM",
+   "pos": [
+    4150,
+    700
+   ],
+   "size": [
+    320,
+    160
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "images",
+     "type": "IMAGE",
+     "link": 32
+    }
+   ],
+   "outputs": [
+    {
+     "name": "images",
+     "type": "IMAGE",
+     "links": [],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "SaveWEBM"
+   },
+   "widgets_values": [
+    "v4d/novel_baked",
+    "vp9",
+    24,
+    24
+   ]
+  },
+  {
+   "id": 4,
+   "type": "SplatFramesFromVideo",
+   "pos": [
+    1250,
+    0
+   ],
+   "size": [
+    320,
+    420
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "frames",
+     "type": "IMAGE",
+     "link": 33
+    },
+    {
+     "name": "depth_seq",
+     "type": "TENSOR",
+     "link": 34
+    },
+    {
+     "name": "static_rgb",
+     "type": "IMAGE",
+     "link": 35
+    },
+    {
+     "name": "static_depth",
+     "type": "TENSOR",
+     "link": 36
+    },
+    {
+     "name": "union_mask",
+     "type": "MASK",
+     "link": 37
+    }
+   ],
+   "outputs": [
+    {
+     "name": "splat_frames",
+     "type": "GSPLAT_SEQ",
+     "links": [
+      24,
+      40,
+      43
+     ],
+     "slot_index": 0
+    },
+    {
+     "name": "static_splats",
+     "type": "GSPLAT",
+     "links": [],
+     "slot_index": 1
+    },
+    {
+     "name": "static_count",
+     "type": "INT",
+     "links": [
+      25
+     ],
+     "slot_index": 2
+    },
+    {
+     "name": "dynamic_count",
+     "type": "INT",
+     "links": [],
+     "slot_index": 3
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "SplatFramesFromVideo"
+   },
+   "widgets_values": [
+    "FISHEYE",
+    180.0,
+    2,
+    1.3,
+    0.95,
+    0.0,
+    0.3,
+    true,
+    16,
+    "auto"
+   ]
+  },
+  {
+   "id": 5,
+   "type": "TransformToMatrix",
+   "pos": [
+    1250,
+    480
+   ],
+   "size": [
+    320,
+    160
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "transformation matrix",
+     "type": "MAT_4X4",
+     "links": [
+      38
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "TransformToMatrix"
+   },
+   "widgets_values": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ]
+  },
+  {
+   "id": 6,
+   "type": "TransformToMatrix",
+   "pos": [
+    1250,
+    700
+   ],
+   "size": [
+    320,
+    160
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "transformation matrix",
+     "type": "MAT_4X4",
+     "links": [
+      39
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "TransformToMatrix"
+   },
+   "widgets_values": [
+    0.15,
+    0.0,
+    0.1,
+    0.0,
+    -10.0
+   ]
+  },
+  {
+   "id": 7,
+   "type": "CameraInterpolationNode",
+   "pos": [
+    1550,
+    560
+   ],
+   "size": [
+    320,
+    120
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "initial_matrix",
+     "type": "MAT_4X4",
+     "link": 38
+    },
+    {
+     "name": "final_matrix",
+     "type": "MAT_4X4",
+     "link": 39
+    }
+   ],
+   "outputs": [
+    {
+     "name": "trajectory",
+     "type": "TENSOR",
+     "links": [
+      29,
+      31,
+      41
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "CameraInterpolationNode"
+   },
+   "widgets_values": [
+    2
+   ]
+  },
+  {
+   "id": 8,
+   "type": "RenderSplatSequence",
+   "pos": [
+    1750,
+    0
+   ],
+   "size": [
+    320,
+    238
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "splat_frames",
+     "type": "GSPLAT_SEQ",
+     "link": 40
+    },
+    {
+     "name": "trajectory",
+     "type": "TENSOR",
+     "link": 41
+    }
+   ],
+   "outputs": [
+    {
+     "name": "images",
+     "type": "IMAGE",
+     "links": [
+      13,
+      42
+     ],
+     "slot_index": 0
+    },
+    {
+     "name": "masks",
+     "type": "MASK",
+     "links": [
+      4,
+      27
+     ],
+     "slot_index": 1
+    },
+    {
+     "name": "disparities",
+     "type": "TENSOR",
+     "links": [
+      28
+     ],
+     "slot_index": 2
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "RenderSplatSequence"
+   },
+   "widgets_values": [
+    "PINHOLE",
+    90.0,
+    1024,
+    1024,
+    "auto",
+    "auto"
+   ]
+  },
+  {
+   "id": 9,
+   "type": "SaveWEBM",
+   "pos": [
+    2150,
+    0
+   ],
+   "size": [
+    320,
+    160
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "images",
+     "type": "IMAGE",
+     "link": 42
+    }
+   ],
+   "outputs": [
+    {
+     "name": "images",
+     "type": "IMAGE",
+     "links": [],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "SaveWEBM"
+   },
+   "widgets_values": [
+    "v4d/novel",
+    "vp9",
+    24,
+    24
+   ]
+  },
+  {
+   "id": 10,
+   "type": "RenderSplatSequence",
+   "pos": [
+    1750,
+    400
+   ],
+   "size": [
+    320,
+    238
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "splat_frames",
+     "type": "GSPLAT_SEQ",
+     "link": 43
+    },
+    {
+     "name": "trajectory",
+     "type": "TENSOR",
+     "link": null
+    }
+   ],
+   "outputs": [
+    {
+     "name": "images",
+     "type": "IMAGE",
+     "links": [
+      44
+     ],
+     "slot_index": 0
+    },
+    {
+     "name": "masks",
+     "type": "MASK",
+     "links": [],
+     "slot_index": 1
+    },
+    {
+     "name": "disparities",
+     "type": "TENSOR",
+     "links": [],
+     "slot_index": 2
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "RenderSplatSequence"
+   },
+   "widgets_values": [
+    "FISHEYE",
+    180.0,
+    512,
+    512,
+    "auto",
+    "auto"
+   ]
+  },
+  {
+   "id": 11,
+   "type": "SaveWEBM",
+   "pos": [
+    2150,
+    400
+   ],
+   "size": [
+    320,
+    160
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "images",
+     "type": "IMAGE",
+     "link": 44
+    }
+   ],
+   "outputs": [
+    {
+     "name": "images",
+     "type": "IMAGE",
+     "links": [],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "SaveWEBM"
+   },
+   "widgets_values": [
+    "v4d/replay",
+    "vp9",
+    24,
+    24
+   ]
+  },
+  {
+   "id": 13,
+   "type": "DepthToImageNode",
+   "pos": [
+    400,
+    350
+   ],
+   "size": [
+    320,
+    120
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "depth",
+     "type": "TENSOR",
+     "link": 45
+    }
+   ],
+   "outputs": [
+    {
+     "name": "depth image",
+     "type": "IMAGE",
+     "links": [
+      46
+     ],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "DepthToImageNode"
+   },
+   "widgets_values": [
+    false
+   ]
+  },
+  {
+   "id": 14,
+   "type": "SaveWEBM",
+   "pos": [
+    700,
+    350
+   ],
+   "size": [
+    320,
+    160
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "images",
+     "type": "IMAGE",
+     "link": 46
+    }
+   ],
+   "outputs": [
+    {
+     "name": "images",
+     "type": "IMAGE",
+     "links": [],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "SaveWEBM"
+   },
+   "widgets_values": [
+    "v4d/depth",
+    "vp9",
+    24,
+    24
+   ]
+  },
+  {
+   "id": 15,
+   "type": "SaveWEBM",
+   "pos": [
+    800,
+    560
+   ],
+   "size": [
+    320,
+    160
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "images",
+     "type": "IMAGE",
+     "link": 47
+    }
+   ],
+   "outputs": [
+    {
+     "name": "images",
+     "type": "IMAGE",
+     "links": [],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "SaveWEBM"
+   },
+   "widgets_values": [
+    "v4d/motion_mask",
+    "vp9",
+    24,
+    24
+   ]
+  },
+  {
+   "id": 16,
+   "type": "SaveImage",
+   "pos": [
+    800,
+    780
+   ],
+   "size": [
+    320,
+    120
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "images",
+     "type": "IMAGE",
+     "link": 48
+    }
+   ],
+   "outputs": [
+    {
+     "name": "images",
+     "type": "IMAGE",
+     "links": [],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "SaveImage"
+   },
+   "widgets_values": [
+    "v4d/static_plate"
+   ]
+  },
+  {
+   "id": 17,
+   "type": "SaveSplats4DVideo",
+   "pos": [
+    2150,
+    750
+   ],
+   "size": [
+    320,
+    212
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "splat_frames",
+     "type": "GSPLAT_SEQ",
+     "link": 49
+    }
+   ],
+   "outputs": [
+    {
+     "name": "info",
+     "type": "STRING",
+     "links": [],
+     "slot_index": 0
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "SaveSplats4DVideo"
+   },
+   "widgets_values": [
+    "splats4d/scene",
+    2.0,
+    4,
+    2.0,
+    30,
+    false
+   ]
+  }
+ ],
+ "links": [
+  [
+   1,
+   1,
+   0,
+   2,
+   0,
+   "IMAGE"
+  ],
+  [
+   2,
+   1,
+   0,
+   3,
+   0,
+   "IMAGE"
+  ],
+  [
+   3,
+   2,
+   0,
+   3,
+   1,
+   "TENSOR"
+  ],
+  [
+   4,
+   8,
+   1,
+   21,
+   0,
+   "MASK"
+  ],
+  [
+   5,
+   21,
+   0,
+   41,
+   0,
+   "MASK"
+  ],
+  [
+   6,
+   41,
+   0,
+   40,
+   0,
+   "MASK"
+  ],
+  [
+   7,
+   22,
+   0,
+   23,
+   0,
+   "MODEL"
+  ],
+  [
+   8,
+   24,
+   0,
+   25,
+   0,
+   "CLIP"
+  ],
+  [
+   9,
+   24,
+   0,
+   26,
+   0,
+   "CLIP"
+  ],
+  [
+   10,
+   25,
+   0,
+   28,
+   0,
+   "CONDITIONING"
+  ],
+  [
+   11,
+   26,
+   0,
+   28,
+   1,
+   "CONDITIONING"
+  ],
+  [
+   12,
+   27,
+   0,
+   28,
+   2,
+   "VAE"
+  ],
+  [
+   13,
+   8,
+   0,
+   28,
+   3,
+   "IMAGE"
+  ],
+  [
+   14,
+   40,
+   0,
+   28,
+   4,
+   "MASK"
+  ],
+  [
+   15,
+   23,
+   0,
+   29,
+   0,
+   "MODEL"
+  ],
+  [
+   16,
+   28,
+   0,
+   29,
+   1,
+   "CONDITIONING"
+  ],
+  [
+   17,
+   28,
+   1,
+   29,
+   2,
+   "CONDITIONING"
+  ],
+  [
+   18,
+   28,
+   2,
+   29,
+   3,
+   "LATENT"
+  ],
+  [
+   19,
+   29,
+   0,
+   31,
+   0,
+   "LATENT"
+  ],
+  [
+   20,
+   28,
+   3,
+   31,
+   1,
+   "INT"
+  ],
+  [
+   21,
+   31,
+   0,
+   32,
+   0,
+   "LATENT"
+  ],
+  [
+   22,
+   27,
+   0,
+   32,
+   1,
+   "VAE"
+  ],
+  [
+   23,
+   32,
+   0,
+   33,
+   0,
+   "IMAGE"
+  ],
+  [
+   24,
+   4,
+   0,
+   45,
+   0,
+   "GSPLAT_SEQ"
+  ],
+  [
+   25,
+   4,
+   2,
+   45,
+   1,
+   "INT"
+  ],
+  [
+   26,
+   32,
+   0,
+   45,
+   2,
+   "IMAGE"
+  ],
+  [
+   27,
+   8,
+   1,
+   45,
+   3,
+   "MASK"
+  ],
+  [
+   28,
+   8,
+   2,
+   45,
+   4,
+   "TENSOR"
+  ],
+  [
+   29,
+   7,
+   0,
+   45,
+   5,
+   "TENSOR"
+  ],
+  [
+   30,
+   45,
+   0,
+   46,
+   0,
+   "GSPLAT_SEQ"
+  ],
+  [
+   31,
+   7,
+   0,
+   46,
+   1,
+   "TENSOR"
+  ],
+  [
+   32,
+   46,
+   0,
+   47,
+   0,
+   "IMAGE"
+  ],
+  [
+   33,
+   1,
+   0,
+   4,
+   0,
+   "IMAGE"
+  ],
+  [
+   34,
+   2,
+   0,
+   4,
+   1,
+   "TENSOR"
+  ],
+  [
+   35,
+   3,
+   0,
+   4,
+   2,
+   "IMAGE"
+  ],
+  [
+   36,
+   3,
+   1,
+   4,
+   3,
+   "TENSOR"
+  ],
+  [
+   37,
+   3,
+   3,
+   4,
+   4,
+   "MASK"
+  ],
+  [
+   38,
+   5,
+   0,
+   7,
+   0,
+   "MAT_4X4"
+  ],
+  [
+   39,
+   6,
+   0,
+   7,
+   1,
+   "MAT_4X4"
+  ],
+  [
+   40,
+   4,
+   0,
+   8,
+   0,
+   "GSPLAT_SEQ"
+  ],
+  [
+   41,
+   7,
+   0,
+   8,
+   1,
+   "TENSOR"
+  ],
+  [
+   42,
+   8,
+   0,
+   9,
+   0,
+   "IMAGE"
+  ],
+  [
+   43,
+   4,
+   0,
+   10,
+   0,
+   "GSPLAT_SEQ"
+  ],
+  [
+   44,
+   10,
+   0,
+   11,
+   0,
+   "IMAGE"
+  ],
+  [
+   45,
+   2,
+   0,
+   13,
+   0,
+   "TENSOR"
+  ],
+  [
+   46,
+   13,
+   0,
+   14,
+   0,
+   "IMAGE"
+  ],
+  [
+   47,
+   3,
+   4,
+   15,
+   0,
+   "IMAGE"
+  ],
+  [
+   48,
+   3,
+   0,
+   16,
+   0,
+   "IMAGE"
+  ],
+  [
+   49,
+   45,
+   0,
+   17,
+   0,
+   "GSPLAT_SEQ"
+  ]
+ ],
+ "groups": [],
+ "config": {},
+ "extra": {},
+ "version": 0.4
+}

@@ -24,7 +24,12 @@ try:
 except Exception as _exc:
     print(f"[camera-comfyUI] Warning: world_nodes could not be loaded, world-building nodes disabled: {_exc}")
     NCM10 = {}
+try:
+    from .video4d_nodes import NODE_CLASS_MAPPINGS as NCM11
+except Exception as _exc:
+    print(f"[camera-comfyUI] Warning: video4d_nodes could not be loaded, per-frame 4D splat nodes disabled: {_exc}")
+    NCM11 = {}
 
-NODE_CLASS_MAPPINGS = {**NCM1, **NCM2, **NCM3, **NCM4, **NCM5, **NCM6, **NCM7, **NCM8, **NCM9, **NCM10}
+NODE_CLASS_MAPPINGS = {**NCM1, **NCM2, **NCM3, **NCM4, **NCM5, **NCM6, **NCM7, **NCM8, **NCM9, **NCM10, **NCM11}
 
 __all__ = ["NODE_CLASS_MAPPINGS"]
